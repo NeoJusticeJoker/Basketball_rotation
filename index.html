@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14171A">
+<title>輪替表 · 籃球上場時間調度</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#EFF1EC;      /* 紙 */
+  --panel:#FFFFFF;
+  --ink:#14171A;        /* 墨 */
+  --rule:#CDD1C6;       /* 格線 */
+  --muted:#6E756A;
+  --hi:#C9F24D;         /* 螢光筆：上場 */
+  --hi-edge:#A6CF2C;
+  --alert:#FF4438;      /* 人數不對 */
+  --num:'Barlow Condensed','Arial Narrow',system-ui,sans-serif;
+  --ui:system-ui,-apple-system,'PingFang TC','Noto Sans TC','Microsoft JhengHei',sans-serif;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper);color:var(--ink);font-family:var(--ui);
+  font-size:15px;line-height:1.45;
+  padding-bottom:env(safe-area-inset-bottom);
+  overscroll-behavior-y:contain;
+}
+.num{font-family:var(--num);font-variant-numeric:tabular-nums;letter-spacing:.01em}
+button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
+input,select{font-family:inherit;font-size:16px;color:inherit} /* 16px 防 iOS 自動放大 */
+
+/* ── 頁首 ── */
+header{
+  background:var(--ink);color:var(--paper);
+  padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
+  display:flex;align-items:baseline;gap:10px;
+}
+header h1{
+  margin:0;font-family:var(--num);font-weight:700;font-size:26px;
+  letter-spacing:.06em;text-transform:uppercase;
+}
+header .fmt{
+  font-family:var(--num);font-size:15px;letter-spacing:.08em;
+  color:var(--hi);margin-left:auto;
+}
+
+/* ── 分頁 ── */
+nav.tabs{display:flex;background:var(--ink);border-bottom:3px solid var(--ink)}
+nav.tabs button{
+  flex:1;background:none;border:0;padding:11px 4px 13px;
+  color:#8E948B;font-weight:600;font-size:14px;letter-spacing:.05em;
+  border-bottom:3px solid transparent;margin-bottom:-3px;
+}
+nav.tabs button[aria-selected=true]{color:var(--paper);border-bottom-color:var(--hi)}
+
+main{padding:14px 12px 90px;max-width:720px;margin:0 auto}
+h2.sec{
+  font-size:12px;font-weight:700;letter-spacing:.16em;color:var(--muted);
+  margin:22px 0 8px;text-transform:uppercase;
+}
+h2.sec:first-child{margin-top:2px}
+.hint{font-size:12.5px;color:var(--muted);line-height:1.6;margin:8px 0 0}
+
+/* ── 按鈕 ── */
+.btn{
+  border:2px solid var(--ink);background:var(--panel);border-radius:2px;
+  padding:11px 14px;font-weight:600;min-height:44px;
+}
+.btn:active{transform:translateY(1px)}
+.btn.solid{background:var(--ink);color:var(--paper)}
+.btn.hi{background:var(--hi);border-color:var(--ink)}
+.btn.ghost{border-color:var(--rule);color:var(--muted);background:transparent}
+.btn.wide{width:100%}
+.btn[disabled]{opacity:.35;pointer-events:none}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row>.btn{flex:1}
+
+/* ── 計時器 ── */
+.clockbox{
+  background:var(--ink);color:var(--paper);border-radius:3px;
+  padding:14px 16px 16px;text-align:center;
+}
+.clockbox .q{
+  font-family:var(--num);font-size:16px;letter-spacing:.22em;color:var(--hi);
+  display:flex;align-items:center;justify-content:center;gap:8px;
+}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--hi);display:inline-block}
+.dot.run{animation:blink 1s steps(2,start) infinite}
+@keyframes blink{50%{opacity:.15}}
+.clockbox .t{
+  font-family:var(--num);font-weight:700;font-size:82px;line-height:.92;
+  letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin:2px 0 4px;
+}
+.clockbox .sub{font-size:12px;color:#9AA096;letter-spacing:.04em}
+@media (prefers-reduced-motion:reduce){.dot.run{animation:none}}
+
+/* ── 場上／場下 ── */
+.warn{
+  background:var(--alert);color:#fff;font-weight:700;font-size:13.5px;
+  padding:8px 12px;border-radius:2px;margin:10px 0 0;letter-spacing:.02em;
+}
+.plist{display:flex;flex-direction:column;gap:6px}
+.pcard{
+  display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  border:2px solid var(--rule);background:var(--panel);border-radius:2px;
+  padding:9px 12px;min-height:54px;
+}
+.pcard.on{background:var(--hi);border-color:var(--ink)}
+.pcard .no{
+  font-family:var(--num);font-weight:700;font-size:24px;min-width:34px;
+  text-align:center;letter-spacing:0;
+}
+.pcard .nm{font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcard .mi{font-family:var(--num);font-size:22px;font-weight:600}
+.pcard .mi small{font-family:var(--ui);font-size:11px;font-weight:400;color:var(--muted)}
+.pcard.on .mi small{color:#4A5241}
+.pcard .role{font-size:11px;color:var(--muted);border:1px solid var(--rule);padding:1px 4px;border-radius:2px}
+.pcard.on .role{border-color:#8FB332;color:#3F4A2C}
+
+/* ── 格子表 ── */
+.qtabs{display:flex;gap:6px;margin-bottom:8px}
+.qtabs button{
+  flex:1;border:2px solid var(--rule);background:var(--panel);border-radius:2px;
+  padding:8px 0;font-family:var(--num);font-size:18px;font-weight:600;min-height:40px;
+}
+.qtabs button[aria-selected=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.gridwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border:2px solid var(--ink);border-radius:3px;background:var(--panel)}
+.grid{display:grid;min-width:100%;touch-action:pan-y}
+.grid>*{border-right:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.grid .hcell{
+  font-family:var(--num);font-size:12px;color:var(--muted);text-align:center;
+  padding:3px 0;background:#E7EAE2;
+}
+.grid .name{
+  position:sticky;left:0;z-index:2;background:var(--panel);
+  display:flex;align-items:center;gap:6px;padding:0 6px;
+  border-right:2px solid var(--ink);font-size:13px;overflow:hidden;
+}
+.grid .name b{font-family:var(--num);font-size:16px;min-width:20px;text-align:right}
+.grid .name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.grid .name i{font-family:var(--num);font-style:normal;font-size:15px;font-weight:600;color:var(--muted)}
+.grid .cell{background:var(--panel);height:34px;padding:0;border-radius:0}
+.grid .cell.on{background:var(--hi);box-shadow:inset 0 0 0 1px var(--hi-edge)}
+.grid .cell.on.s{border-top-left-radius:9px;border-bottom-left-radius:9px}
+.grid .cell.on.e{border-top-right-radius:9px;border-bottom-right-radius:9px}
+.grid .cell:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.grid .cnt{
+  font-family:var(--num);font-size:15px;font-weight:600;text-align:center;
+  background:#E7EAE2;padding:3px 0;
+}
+.grid .cnt.bad{background:var(--alert);color:#fff}
+.grid .name.foot{font-size:11px;color:var(--muted);letter-spacing:.08em;background:#E7EAE2}
+
+/* ── 表格 ── */
+table{width:100%;border-collapse:collapse;background:var(--panel);border:2px solid var(--ink);border-radius:3px}
+th,td{border-bottom:1px solid var(--rule);padding:7px 6px;text-align:right;font-size:14px}
+th{font-size:11px;letter-spacing:.06em;color:var(--muted);background:#E7EAE2;font-weight:700}
+th:first-child,td:first-child{text-align:left}
+td.n{font-family:var(--num);font-size:18px;font-weight:600}
+td .diff{font-family:var(--num);font-size:13px;margin-left:3px}
+.pos{color:#2F7A2A}.neg{color:var(--alert)}
+tr.tot td{background:#E7EAE2;font-weight:700}
+
+/* ── 設定 ── */
+.rrow{display:grid;grid-template-columns:58px 1fr 92px;gap:6px;margin-bottom:6px}
+.rrow input,.rrow select{
+  border:2px solid var(--rule);border-radius:2px;padding:9px 8px;background:var(--panel);
+  min-height:44px;width:100%;
+}
+.rrow input:focus,.rrow select:focus{outline:none;border-color:var(--ink)}
+.wrow{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.wrow label{font-size:12px;color:var(--muted);display:block;margin-bottom:3px}
+.wrow input{border:2px solid var(--rule);border-radius:2px;padding:9px;width:100%;min-height:44px}
+
+.fab{
+  position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));
+  z-index:20;box-shadow:0 3px 0 var(--ink);
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ROTATION</h1>
+  <span class="fmt num" id="fmtBadge">40 MIN</span>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="live"  aria-selected="true">即時</button>
+  <button data-tab="plan"  aria-selected="false">預排</button>
+  <button data-tab="stat"  aria-selected="false">統計</button>
+  <button data-tab="setup" aria-selected="false">名單</button>
+</nav>
+
+<main id="view"></main>
+
+<script>
+"use strict";
+
+/* ═══════════════ 資料 ═══════════════
+   所有時間一律用「整數分鐘」與「整數毫秒」，不出現浮點數累加。
+   grid[節][分] = [在場球員 id]，該分鐘結束時的場上五人。
+   預排(plan) 與 即時(live) 是兩張獨立的表，互不覆蓋。            */
+
+const LS = 'hoop-rotation-v1';
+const uid = () => Math.random().toString(36).slice(2, 9);
+const ROLES = { S: '先發', R: '輪替', B: '板凳' };
+
+const blankRoster = () =>
+  Array.from({ length: 15 }, () => ({ id: uid(), no: '', name: '', role: 'R' }));
+const blankGrid = qm =>
+  Array.from({ length: 4 }, () => Array.from({ length: qm }, () => []));
+
+function defaults() {
+  return {
+    fmt: 40, qMin: 10,
+    roster: blankRoster(),
+    w: { S: 1.5, R: 1, B: 0.5 },
+    plan: blankGrid(10),
+    live: blankGrid(10),
+    lv: { q: 0, acc: 0, startedAt: null, running: false, onCourt: [], written: 0 },
+    tab: 'live', gq: 0, gridSrc: 'plan', showLiveGrid: false
+  };
+}
+
+let S = defaults();
+try {
+  const raw = localStorage.getItem(LS);
+  if (raw) {
+    const o = JSON.parse(raw);
+    S = Object.assign(defaults(), o);
+    S.lv = Object.assign(defaults().lv, o.lv || {});
+    // 重新載入一律停錶：離開頁面期間的真實時間無法判斷是不是還在打球
+    S.lv.running = false;
+    S.lv.startedAt = null;
+  }
+} catch (e) { S = defaults(); }
+
+let saveTimer = null;
+function save(now) {
+  clearTimeout(saveTimer);
+  const doIt = () => { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} };
+  now ? doIt() : (saveTimer = setTimeout(doIt, 250));
+}
+
+/* ── 衍生資料 ── */
+const actives = () => S.roster.filter(p => String(p.no).trim() || p.name.trim());
+const byId = id => S.roster.find(p => p.id === id);
+const label = p => (p.name.trim() || (String(p.no).trim() ? '#' + p.no : '未命名'));
+const gameMin = () => S.qMin * 4;
+const seatMin = () => S.qMin * 4 * 5;          // 全隊可分配的人．分鐘
+
+function minutesOf(src, id) {
+  const g = S[src]; let t = 0; const q = [0, 0, 0, 0];
+  for (let i = 0; i < 4; i++) for (let m = 0; m < S.qMin; m++)
+    if (g[i][m].indexOf(id) >= 0) { t++; q[i]++; }
+  return { total: t, q };
+}
+
+function suggestions() {
+  const ps = actives();
+  const sum = ps.reduce((a, p) => a + (+S.w[p.role] || 0), 0);
+  const out = {};
+  ps.forEach(p => {
+    const raw = sum > 0 ? seatMin() * (+S.w[p.role] || 0) / sum : 0;
+    out[p.id] = Math.min(gameMin(), Math.round(raw));
+  });
+  return out;
+}
+
+/* ═══════════════ 即時計時 ═══════════════ */
+const elapsed = () => S.lv.acc + (S.lv.running ? Date.now() - S.lv.startedAt : 0);
+
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+    else if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  } catch (e) { /* 不支援就算了，不影響功能 */ }
+}
+
+function startClock() {
+  if (S.lv.running) return;
+  if (elapsed() >= S.qMin * 60000) return;      // 本節已滿，先按「下一節」
+  S.lv.startedAt = Date.now();
+  S.lv.running = true;
+  keepAwake(true); save(true); render();
+}
+function pauseClock() {
+  if (!S.lv.running) return;
+  S.lv.acc = elapsed();
+  S.lv.running = false;
+  S.lv.startedAt = null;
+  keepAwake(false); save(true); render();
+}
+
+/* 每 400ms 由時間戳重算，不做 tick 累加 —— 手機切到背景被節流也不會漂移 */
+function tick() {
+  if (S.tab !== 'live') return;
+  const el = elapsed();
+  const done = Math.min(S.qMin, Math.floor(el / 60000));
+  if (done > S.lv.written) {
+    for (let m = S.lv.written; m < done; m++) S.live[S.lv.q][m] = S.lv.onCourt.slice();
+    S.lv.written = done;
+    save(true); render(); return;
+  }
+  if (el >= S.qMin * 60000 && S.lv.running) { pauseClock(); return; }
+  const t = document.getElementById('clockT');
+  if (t) t.textContent = clockText(el);
+  if (S.lv.running && el % 4000 < 400) { S.lv.acc = el; S.lv.startedAt = Date.now(); save(); }
+}
+setInterval(tick, 400);
+
+function clockText(el) {
+  const remain = Math.max(0, S.qMin * 60000 - el);
+  const s = Math.ceil(remain / 1000);
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+
+/* ═══════════════ 繪製 ═══════════════ */
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const view = document.getElementById('view');
+
+function render() {
+  document.getElementById('fmtBadge').textContent = S.fmt + ' MIN';
+  document.querySelectorAll('#tabs button').forEach(b =>
+    b.setAttribute('aria-selected', String(b.dataset.tab === S.tab)));
+  view.innerHTML =
+    S.tab === 'live' ? liveHTML() :
+    S.tab === 'plan' ? planHTML() :
+    S.tab === 'stat' ? statHTML() : setupHTML();
+  if (S.tab === 'plan' || (S.tab === 'live' && S.showLiveGrid)) decorate();
+  window.scrollTo({ top: 0 });
+}
+
+/* ── 即時 ── */
+function liveHTML() {
+  const ps = actives();
+  if (!ps.length) return empty();
+  const el = elapsed();
+  const on = ps.filter(p => S.lv.onCourt.indexOf(p.id) >= 0);
+  const off = ps.filter(p => S.lv.onCourt.indexOf(p.id) < 0);
+
+  const card = p => {
+    const m = minutesOf('live', p.id).total;
+    return `<button class="pcard${S.lv.onCourt.indexOf(p.id) >= 0 ? ' on' : ''}" data-sub="${p.id}">
+      <span class="no">${esc(p.no) || '–'}</span>
+      <span class="nm">${esc(p.name.trim() || '未命名')}</span>
+      <span class="role">${ROLES[p.role]}</span>
+      <span class="mi">${m}<small> 分</small></span></button>`;
+  };
+
+  return `
+  <div class="clockbox">
+    <div class="q"><span class="dot${S.lv.running ? ' run' : ''}"></span>第 ${S.lv.q + 1} 節</div>
+    <div class="t" id="clockT">${clockText(el)}</div>
+    <div class="sub">已記錄 ${S.lv.written} 分 · 本節共 ${S.qMin} 分</div>
+  </div>
+
+  <div class="row" style="margin-top:10px">
+    <button class="btn ${S.lv.running ? '' : 'hi'}" data-act="toggleClock">${S.lv.running ? '暫停' : '開始'}</button>
+    <button class="btn" data-act="nextQ" ${S.lv.q >= 3 ? 'disabled' : ''}>下一節</button>
+    <button class="btn ghost" data-act="resetLive">重設</button>
+  </div>
+
+  ${S.lv.onCourt.length !== 5
+      ? `<p class="warn">場上 ${S.lv.onCourt.length} 人，不是 5 人。這一分鐘結束時會照現在的名單記錄。</p>` : ''}
+
+  <h2 class="sec">場上 ${on.length}</h2>
+  <div class="plist">${on.map(card).join('') || '<p class="hint">點下面的球員讓他上場。</p>'}</div>
+
+  <h2 class="sec">場下 ${off.length}</h2>
+  <div class="plist">${off.map(card).join('')}</div>
+
+  <h2 class="sec">實際紀錄</h2>
+  <button class="btn wide ghost" data-act="toggleLiveGrid">${S.showLiveGrid ? '收合紀錄表' : '展開紀錄表（可修正誤觸）'}</button>
+  ${S.showLiveGrid ? `<div style="margin-top:10px">${gridHTML('live')}</div>` : ''}
+  <p class="hint">計分方式：每一分鐘「結束的那一刻」場上是誰，這 1 分就算誰。忘了按或按錯，直接到紀錄表上塗掉／補上。</p>`;
+}
+
+/* ── 預排 ── */
+function planHTML() {
+  const ps = actives();
+  if (!ps.length) return empty();
+  return `
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn ghost" data-act="undo">復原上一步</button>
+      <button class="btn ghost" data-act="clearQ">清空本節</button>
+      <button class="btn ghost" data-act="copyPrevQ" ${S.gq === 0 ? 'disabled' : ''}>複製上一節</button>
+    </div>
+    ${gridHTML('plan')}
+    <p class="hint">在格子上按住橫向拖曳可以連續塗滿。名字左邊那欄的數字是<strong>全場</strong>累計分鐘，最底下那列是每分鐘的場上人數，不是 5 就會變紅。</p>`;
+}
+
+/* ── 格子表（預排與即時共用） ── */
+function gridHTML(src) {
+  const ps = actives(), n = S.qMin;
+  const cols = `88px repeat(${n},minmax(24px,1fr))`;
+  let h = `<div class="qtabs">` +
+    [0, 1, 2, 3].map(i => `<button data-q="${i}" aria-selected="${S.gq === i}">Q${i + 1}</button>`).join('') +
+    `</div><div class="gridwrap"><div class="grid" id="grid" data-src="${src}" style="grid-template-columns:${cols}">`;
+
+  h += `<div class="hcell name" style="border-right:2px solid var(--ink)">分鐘</div>`;
+  for (let m = 0; m < n; m++) h += `<div class="hcell">${m + 1}</div>`;
+
+  ps.forEach(p => {
+    h += `<div class="name"><b>${esc(p.no)}</b><span>${esc(p.name.trim() || '未命名')}</span><i data-tot="${p.id}">0</i></div>`;
+    for (let m = 0; m < n; m++)
+      h += `<button class="cell" data-pid="${p.id}" data-m="${m}" aria-label="第${S.gq + 1}節第${m + 1}分"></button>`;
+  });
+
+  h += `<div class="name foot">場上人數</div>`;
+  for (let m = 0; m < n; m++) h += `<div class="cnt" data-cnt="${m}">0</div>`;
+  return h + `</div></div>`;
+}
+
+/* 重畫格子狀態、螢光筆連段圓角、人數與總分鐘 */
+function decorate() {
+  const g = document.getElementById('grid'); if (!g) return;
+  const src = g.dataset.src, data = S[src][S.gq], ids = actives().map(p => p.id);
+  g.querySelectorAll('.cell').forEach(c => {
+    const pid = c.dataset.pid, m = +c.dataset.m;
+    const on = data[m].indexOf(pid) >= 0;
+    c.classList.toggle('on', on);
+    c.classList.toggle('s', on && (m === 0 || data[m - 1].indexOf(pid) < 0));
+    c.classList.toggle('e', on && (m === S.qMin - 1 || data[m + 1].indexOf(pid) < 0));
+  });
+  g.querySelectorAll('[data-cnt]').forEach(e => {
+    const m = +e.dataset.cnt;
+    const c = data[m].filter(id => ids.indexOf(id) >= 0).length;
+    e.textContent = c; e.classList.toggle('bad', c !== 5);
+  });
+  g.querySelectorAll('[data-tot]').forEach(e => { e.textContent = minutesOf(src, e.dataset.tot).total; });
+}
+
+/* ── 統計 ── */
+function statHTML() {
+  const ps = actives();
+  if (!ps.length) return empty();
+  const sug = suggestions();
+  let tp = 0, tl = 0;
+  const rows = ps.map(p => {
+    const pl = minutesOf('plan', p.id).total, lv = minutesOf('live', p.id).total, sg = sug[p.id];
+    tp += pl; tl += lv;
+    const d = v => { const x = v - sg; return `<span class="diff ${x > 0 ? 'pos' : x < 0 ? 'neg' : ''}">${x > 0 ? '+' + x : x}</span>`; };
+    return `<tr><td>${esc(p.no ? p.no + ' ' : '')}${esc(p.name.trim() || '未命名')}<br>
+      <small style="color:var(--muted)">${ROLES[p.role]}</small></td>
+      <td class="n">${sg}</td>
+      <td class="n">${pl}${d(pl)}</td>
+      <td class="n">${lv}${d(lv)}</td></tr>`;
+  }).join('');
+
+  return `
+  <table>
+    <tr><th>球員</th><th>建議</th><th>預排</th><th>實際</th></tr>
+    ${rows}
+    <tr class="tot"><td>合計 / 應為 ${seatMin()}</td><td class="n">—</td>
+      <td class="n" style="${tp !== seatMin() ? 'color:var(--alert)' : ''}">${tp}</td>
+      <td class="n">${tl}</td></tr>
+  </table>
+  <div class="row" style="margin-top:12px">
+    <button class="btn" data-act="csv">下載 CSV</button>
+    <button class="btn" data-act="copy">複製表格</button>
+  </div>
+  <h2 class="sec">建議分鐘怎麼算的</h2>
+  <p class="hint">
+    全場可分配的人．分鐘＝4 節 × ${S.qMin} 分 × 5 人 ＝ <strong>${seatMin()}</strong>。<br>
+    每人建議 ＝ ${seatMin()} × 自己的角色權重 ÷ 全隊權重總和，上限 ${gameMin()} 分。<br>
+    目前權重：先發 ${S.w.S}、輪替 ${S.w.R}、板凳 ${S.w.B}（可在「名單」頁改）。權重全設 1 就是全隊平均。<br>
+    建議值只是參考線，<strong>不會自動改動你塗的任何一格</strong>。四捨五入後合計可能與 ${seatMin()} 差個 1～2 分，屬正常。<br>
+    「預排」合計必須剛好 ${seatMin()}；不是的話代表有某幾分鐘場上不是 5 人。
+  </p>`;
+}
+
+/* ── 名單 ── */
+function setupHTML() {
+  const rows = S.roster.map((p, i) => `
+    <div class="rrow">
+      <input inputmode="numeric" maxlength="3" placeholder="${i + 1}" value="${esc(p.no)}" data-f="no" data-i="${i}">
+      <input placeholder="姓名（可留空）" value="${esc(p.name)}" data-f="name" data-i="${i}">
+      <select data-f="role" data-i="${i}">
+        ${Object.keys(ROLES).map(k => `<option value="${k}"${p.role === k ? ' selected' : ''}>${ROLES[k]}</option>`).join('')}
+      </select>
+    </div>`).join('');
+
+  return `
+  <h2 class="sec">賽制</h2>
+  <div class="row">
+    <button class="btn ${S.fmt === 40 ? 'solid' : ''}" data-act="fmt" data-v="40">40 分鐘制<br><small>4 節 × 10 分</small></button>
+    <button class="btn ${S.fmt === 48 ? 'solid' : ''}" data-act="fmt" data-v="48">48 分鐘制<br><small>4 節 × 12 分</small></button>
+  </div>
+
+  <h2 class="sec">名單（背號與姓名都可留空）</h2>
+  ${rows}
+
+  <h2 class="sec">角色權重</h2>
+  <div class="wrow">
+    ${['S', 'R', 'B'].map(k => `<div><label>${ROLES[k]}</label>
+      <input inputmode="decimal" value="${S.w[k]}" data-w="${k}"></div>`).join('')}
+  </div>
+  <p class="hint">權重只影響「統計」頁的建議分鐘。三個都填 1 ＝ 全隊平均分配。</p>
+
+  <h2 class="sec">資料</h2>
+  <p class="hint">每次操作都會自動存在這支手機的瀏覽器裡，關掉頁面再打開仍在。清除瀏覽器資料會一併消失，重要場次記得先下載 CSV。</p>
+  <button class="btn wide ghost" data-act="wipe" style="margin-top:8px;color:var(--alert);border-color:var(--alert)">清除全部資料</button>`;
+}
+
+const empty = () => `<p class="hint" style="margin-top:24px">還沒有球員。先到「名單」頁填背號或姓名，至少填一個人。</p>`;
+
+/* ═══════════════ 互動 ═══════════════ */
+const undoStack = [];
+function pushUndo(src) {
+  undoStack.push({ src, data: JSON.stringify(S[src]) });
+  if (undoStack.length > 30) undoStack.shift();
+}
+
+document.getElementById('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.tab = b.dataset.tab; save(); render();
+});
+
+view.addEventListener('click', e => {
+  const sub = e.target.closest('[data-sub]');
+  if (sub) {
+    const id = sub.dataset.sub, i = S.lv.onCourt.indexOf(id);
+    i >= 0 ? S.lv.onCourt.splice(i, 1) : S.lv.onCourt.push(id);
+    save(true); render(); return;
+  }
+  const q = e.target.closest('[data-q]');
+  if (q) { S.gq = +q.dataset.q; save(); render(); return; }
+
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const act = b.dataset.act;
+
+  if (act === 'toggleClock') S.lv.running ? pauseClock() : startClock();
+
+  else if (act === 'nextQ') {
+    pauseClock();
+    if (S.lv.written < S.qMin && !confirm(`第 ${S.lv.q + 1} 節只記錄了 ${S.lv.written} 分，還沒滿 ${S.qMin} 分。要直接進下一節嗎？`)) return;
+    S.lv.q = Math.min(3, S.lv.q + 1); S.lv.acc = 0; S.lv.written = 0; S.gq = S.lv.q;
+    save(true); render();
+  }
+  else if (act === 'resetLive') {
+    if (!confirm('清空「即時」的所有紀錄與計時？（預排表不受影響）')) return;
+    pauseClock();
+    S.live = blankGrid(S.qMin);
+    S.lv = Object.assign(defaults().lv, { onCourt: S.lv.onCourt });
+    save(true); render();
+  }
+  else if (act === 'toggleLiveGrid') { S.showLiveGrid = !S.showLiveGrid; S.gq = S.lv.q; save(); render(); }
+
+  else if (act === 'undo') {
+    const u = undoStack.pop();
+    if (!u) return;
+    S[u.src] = JSON.parse(u.data); save(true); render();
+  }
+  else if (act === 'clearQ') {
+    if (!confirm(`清空預排第 ${S.gq + 1} 節？`)) return;
+    pushUndo('plan');
+    S.plan[S.gq] = Array.from({ length: S.qMin }, () => []);
+    save(true); render();
+  }
+  else if (act === 'copyPrevQ') {
+    pushUndo('plan');
+    S.plan[S.gq] = S.plan[S.gq - 1].map(a => a.slice());
+    save(true); render();
+  }
+
+  else if (act === 'fmt') {
+    const v = +b.dataset.v; if (v === S.fmt) return;
+    const used = ['plan', 'live'].some(s => S[s].some(q => q.some(m => m.length)));
+    if (used && !confirm('改賽制會清空預排表與即時紀錄，確定？')) return;
+    S.fmt = v; S.qMin = v === 40 ? 10 : 12;
+    S.plan = blankGrid(S.qMin); S.live = blankGrid(S.qMin);
+    S.lv = Object.assign(defaults().lv, { onCourt: S.lv.onCourt });
+    undoStack.length = 0; save(true); render();
+  }
+  else if (act === 'wipe') {
+    if (!confirm('清除名單、預排與紀錄，全部歸零？')) return;
+    localStorage.removeItem(LS); S = defaults(); render();
+  }
+  else if (act === 'csv') downloadCSV();
+  else if (act === 'copy') copyTable();
+});
+
+view.addEventListener('input', e => {
+  const t = e.target;
+  if (t.dataset.f !== undefined) {
+    const p = S.roster[+t.dataset.i];
+    p[t.dataset.f] = t.dataset.f === 'no' ? t.value.replace(/\D/g, '').slice(0, 3) : t.value;
+    if (t.dataset.f === 'no') t.value = p.no;
+    save();
+  } else if (t.dataset.w) {
+    const v = parseFloat(t.value);
+    S.w[t.dataset.w] = isNaN(v) || v < 0 ? 0 : v;
+    save();
+  }
+});
+
+/* ── 塗格子：按住橫向拖曳連塗 ── */
+let paint = null;
+view.addEventListener('pointerdown', e => {
+  const c = e.target.closest('.cell'); if (!c) return;
+  const g = c.closest('.grid');
+  pushUndo(g.dataset.src);
+  paint = { src: g.dataset.src, on: !c.classList.contains('on') };
+  applyCell(c);
+  try { g.setPointerCapture(e.pointerId); } catch (err) {}
+});
+view.addEventListener('pointermove', e => {
+  if (!paint) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const c = el && el.closest ? el.closest('.cell') : null;
+  if (c) applyCell(c);
+});
+['pointerup', 'pointercancel'].forEach(ev =>
+  window.addEventListener(ev, () => { if (paint) { paint = null; save(true); decorate(); } }));
+
+function applyCell(c) {
+  const arr = S[paint.src][S.gq][+c.dataset.m], pid = c.dataset.pid, i = arr.indexOf(pid);
+  if (paint.on && i < 0) arr.push(pid);
+  else if (!paint.on && i >= 0) arr.splice(i, 1);
+  else return;
+  c.classList.toggle('on', paint.on);
+}
+
+/* ── 匯出 ── */
+function tableRows() {
+  const sug = suggestions();
+  const head = ['背號', '姓名', '角色', '建議',
+    ...[1, 2, 3, 4].map(i => '預排Q' + i), '預排總',
+    ...[1, 2, 3, 4].map(i => '實際Q' + i), '實際總'];
+  const body = actives().map(p => {
+    const pl = minutesOf('plan', p.id), lv = minutesOf('live', p.id);
+    return [p.no, p.name.trim() || '未命名', ROLES[p.role], sug[p.id],
+      ...pl.q, pl.total, ...lv.q, lv.total];
+  });
+  return [head, ...body];
+}
+function downloadCSV() {
+  const csv = '\uFEFF' + tableRows()
+    .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `上場時間_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function copyTable() {
+  const txt = tableRows().map(r => r.join('\t')).join('\n');
+  const done = () => alert('已複製，可直接貼到 LINE 或試算表。');
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done, () => prompt('手動複製：', txt));
+  else prompt('手動複製：', txt);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.lv.running) keepAwake(true);
+});
+
+render();
+</script>
+</body>
+</html>
