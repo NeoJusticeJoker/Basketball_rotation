@@ -4,7 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#14171A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="籃球輪替">
 <title>輪替表 · 籃球上場時間調度</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
@@ -110,6 +116,7 @@ tr.tot td{background:#E7EAE2;font-weight:700}
 .rrow input,.rrow select{border:2px solid var(--rule);border-radius:2px;padding:9px 6px;background:var(--panel);
   min-height:44px;width:100%}
 .rrow input:focus,.rrow select:focus{outline:none;border-color:var(--ink)}
+.pastebox{width:100%;min-height:130px;border:2px solid var(--rule);border-radius:2px;padding:10px;background:var(--panel);font:13px ui-monospace,monospace}
 .rhead{display:grid;grid-template-columns:50px 1fr 66px 72px;gap:5px;font-size:11px;color:var(--muted);
   letter-spacing:.06em;margin-bottom:4px;padding:0 2px}
 .wrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -165,7 +172,7 @@ const LS_OLD = 'hoop-rotation-v1';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const ROLES = { S: '先發', R: '輪替' };
 const POS = ['PG', 'SG', 'SF', 'PF', 'C'];
-const ALGO = 4;      // 自動預排演算法版本：舊版排的表要提醒重排
+const ALGO = 5;      // 自動預排演算法版本：舊版排的表要提醒重排
 
 const blankRoster = () => Array.from({ length: 15 }, (_, i) =>
   ({ id: uid(), no: '', name: '', role: i < 5 ? 'S' : 'R', pos: POS[i % 5] }));
@@ -173,7 +180,7 @@ const blankGrid = qm => Array.from({ length: 4 }, () => Array.from({ length: qm 
 
 function defaults() {
   return {
-    fmt: 40, qMin: 10,
+    fmt: 32, qMin: 8,
     roster: blankRoster(),
     w: { S: 1.5, R: 1 },
     plan: blankGrid(10), live: blankGrid(10),
@@ -191,6 +198,7 @@ let S = defaults();
   try {
     const o = JSON.parse(raw);
     S = Object.assign(defaults(), o);
+    if (!o.qMin) S.qMin = S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8;
     S.lv = Object.assign(defaults().lv, o.lv || {});
     S.w = { S: +(o.w && o.w.S) || 1.5, R: +(o.w && o.w.R) || 1 };
     // v1 → v2：板凳併入輪替、補上位置欄
@@ -237,6 +245,9 @@ function suggestions() {
    k=0 代表這段全先發在場（開節、收尾）。教練一次只換 1～2 人，先發錯開休息，
    所以場上永遠是先發與替補混編，不會整批五上五下。                     */
 const SCEN = {
+  balanced: { name: '32 分鐘均衡', desc: '每節 8 分鐘上場、2 分鐘輪休', z: [
+    [[0, .8, 0], [.8, 1, 5]], [[0, .8, 0], [.8, 1, 5]],
+    [[0, .2, 5], [.2, 1, 0]], [[0, .2, 5], [.2, 1, 0]] ] },
   tight: { name: '拉鋸戰', desc: '第四節主力收尾', z: [
     [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, .3, 2], [.3, 1, 0]] ] },
   lead:  { name: '大幅領先', desc: '第四節放輪替', z: [
@@ -297,7 +308,7 @@ function autoPlan(key, onlyQ4) {
   };
 
   const chunks = [];
-  for (let lane = 0; lane < 4 && order.length; lane++) {
+  for (let lane = 0; lane < 5 && order.length; lane++) {
     const idx = tl.map((c, i) => c.k > lane ? i : -1).filter(i => i >= 0);
     if (!idx.length) continue;
     const segs = [];                               // 切成時間上連續的段
@@ -627,7 +638,7 @@ function planHTML() {
       ${Object.keys(SCEN).map(k => `<button class="btn" data-scen="${k}">${SCEN[k].name}<small>${SCEN[k].desc}</small></button>`).join('')}
     </div>
     ${S.planScen ? `<p class="hint" style="margin-top:6px">目前套用：<strong>${esc(S.planScen)}</strong>${S.stalePlan ? '' : ' · 已依區段排定'}</p>` : ''}
-    <p class="hint">照 FIBA 教練的習慣排：先發<strong>錯開下場</strong>休息，一個換人時機通常只動 1～2 人，場上永遠是先發加替補混編。內線先休息、控球留到最後；每節開頭與第四節收尾先發全員在場。一次下場至少休息 3 分鐘，回來後至少再打 3 分鐘。位置各派一人所以每分鐘剛好 5 人。排完之後<strong>每一格都還是可以自己塗改</strong>。</p>
+    <p class="hint">社區賽預設採<strong>32 分鐘、每節 8 分鐘</strong>的均衡安排：Q1、Q2 先打 8 分鐘再休 2 分鐘；Q3、Q4 先休 2 分鐘再打 8 分鐘。中場的休息時間依你們賽制另計。也保留拉鋸戰、領先、落後情境，可按需要改排；排完之後<strong>每一格都可以自己塗改</strong>。</p>
     <div class="row" style="margin:14px 0 10px">
       <button class="btn ghost" data-act="undo">復原上一步</button>
       <button class="btn ghost" data-act="clearQ">清空本節</button>
@@ -704,7 +715,7 @@ function statHTML() {
 function setupHTML() {
   const rows = S.roster.map((p, i) => `
     <div class="rrow">
-      <input inputmode="numeric" maxlength="3" placeholder="${i + 1}" value="${esc(p.no)}" data-f="no" data-i="${i}">
+      <input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="3" placeholder="${i + 1}" value="${esc(p.no)}" data-f="no" data-i="${i}" aria-label="第 ${i + 1} 位球員背號">
       <input placeholder="姓名（可留空）" value="${esc(p.name)}" data-f="name" data-i="${i}">
       <select data-f="pos" data-i="${i}">${POS.map(k => `<option value="${k}"${p.pos === k ? ' selected' : ''}>${k}</option>`).join('')}</select>
       <select data-f="role" data-i="${i}">${Object.keys(ROLES).map(k => `<option value="${k}"${p.role === k ? ' selected' : ''}>${ROLES[k]}</option>`).join('')}</select>
@@ -712,6 +723,7 @@ function setupHTML() {
   return `
   <h2 class="sec">賽制</h2>
   <div class="row">
+    <button class="btn ${S.fmt === 32 ? 'solid' : ''}" data-act="fmt" data-v="32">社區賽<small>32 分鐘 · 4 節 × 8 分</small></button>
     <button class="btn ${S.fmt === 40 ? 'solid' : ''}" data-act="fmt" data-v="40">40 分鐘制<small>4 節 × 10 分</small></button>
     <button class="btn ${S.fmt === 48 ? 'solid' : ''}" data-act="fmt" data-v="48">48 分鐘制<small>4 節 × 12 分</small></button>
   </div>
@@ -719,7 +731,7 @@ function setupHTML() {
   <h2 class="sec">名單（背號與姓名都可留空）</h2>
   <div class="rhead"><span>背號</span><span>姓名</span><span>位置</span><span>角色</span></div>
   ${rows}
-  <p class="hint">自動預排會照位置各派一人，所以五個位置最好都要有先發，也各留一個輪替。</p>
+  <p class="hint">自動預排會照位置各派一人，所以五個位置最好都要有先發，也各留一個輪替。背號只接受 0–9 數字，最多 3 位。</p>
 
   <h2 class="sec">角色權重</h2>
   <div class="wrow">${['S', 'R'].map(k => `<div><label>${ROLES[k]}</label>
@@ -732,10 +744,10 @@ function setupHTML() {
     <button class="btn" data-act="impRoster">匯入名單</button>
   </div>
   <button class="btn wide ghost" data-act="impPaste" style="margin-top:8px">貼上文字匯入</button>
-  <p class="hint">匯出成 .json 檔（含賽制與權重），下次比賽匯入就不用重打。匯入會取代目前名單，並清空預排表與即時紀錄。</p>
+  <p class="hint">手機可用「匯出名單」開啟分享選單，存到「檔案」或傳給隊友；也會複製一份文字備份。匯入時可選檔案，或貼上備份文字。資料仍保存在目前這台裝置的瀏覽器；需要跨裝置同步時，請用分享／備份檔案轉移。</p>
 
   <h2 class="sec">資料</h2>
-  <p class="hint">每次操作自動存在這支手機的瀏覽器，關掉再開仍在。清除瀏覽器資料會一併消失，重要場次先下載 CSV。</p>
+  <p class="hint">GitHub Pages 使用 HTTPS，可離線開啟並加入手機主畫面。iPhone／iPad：Safari 分享按鈕 →「加入主畫面」；Android：瀏覽器選單 →「安裝應用程式」或「加到主畫面」。每次操作自動存在這支裝置的瀏覽器，清除瀏覽器資料會一併消失，重要場次請先匯出名單並下載 CSV。</p>
   <button class="btn wide ghost" data-act="wipe" style="margin-top:8px;color:var(--alert);border-color:var(--alert)">清除全部資料</button>`;
 }
 
@@ -971,7 +983,7 @@ view.addEventListener('click', e => {
     const v = +b.dataset.v; if (v === S.fmt) return;
     const used = ['plan', 'live'].some(s => S[s].some(qq => qq.some(m => m.length)));
     if (used && !confirm('改賽制會清空預排表與即時紀錄，確定？')) return;
-    S.fmt = v; S.qMin = v === 40 ? 10 : 12;
+    S.fmt = v; S.qMin = v === 32 ? 8 : v === 40 ? 10 : 12;
     S.plan = blankGrid(S.qMin); S.live = blankGrid(S.qMin);
     S.lv = Object.assign(defaults().lv, { onCourt: S.lv.onCourt });
     undoStack.length = 0; save(true); render();
@@ -1013,8 +1025,21 @@ view.addEventListener('click', e => {
   else if (act === 'expRoster') exportRoster();
   else if (act === 'impRoster') document.getElementById('impFile').click();
   else if (act === 'impPaste') {
-    const t = prompt('把匯出的內容整段貼在這裡：');
-    if (t) applyRoster(t);
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      navigator.clipboard.readText().then(t => {
+        if (t.trim().startsWith('{')) applyRoster(t);
+        else {
+          const pasted = prompt('剪貼簿沒有找到 JSON。請貼上匯出的名單文字：');
+          if (pasted) applyRoster(pasted);
+        }
+      }).catch(() => {
+        const pasted = prompt('請貼上匯出的名單文字：');
+        if (pasted) applyRoster(pasted);
+      });
+    } else {
+      const pasted = prompt('請貼上匯出的名單文字：');
+      if (pasted) applyRoster(pasted);
+    }
   }
 });
 
@@ -1034,6 +1059,7 @@ view.addEventListener('input', e => {
 view.addEventListener('change', e => {          // select 只發 change
   const t = e.target;
   if (t.tagName === 'SELECT' && t.dataset.f) { S.roster[+t.dataset.i][t.dataset.f] = t.value; save(true); render(); }
+  else if (t.dataset.f === 'no') { S.roster[+t.dataset.i].no = t.value.replace(/\D/g, '').slice(0, 3); t.value = S.roster[+t.dataset.i].no; save(true); }
 });
 
 /* ── 塗格子：按住橫向拖曳連塗 ── */
@@ -1069,19 +1095,31 @@ function dl(text, name, mime) {
   a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-function exportRoster() {
+async function exportRoster() {
   const data = { app: 'hoop-rotation', v: 2, fmt: S.fmt, w: S.w, plays: S.plays,
     roster: S.roster.map(p => ({ no: p.no, name: p.name, pos: p.pos, role: p.role })) };
   const txt = JSON.stringify(data);
-  dl(txt, `名單_${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
-  if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(() => {});
+  const name = `名單_${new Date().toISOString().slice(0, 10)}.json`;
+  const file = new File([txt], name, { type: 'application/json' });
+  try {
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ title: '籃球輪替名單', files: [file] });
+      if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(() => {});
+      return;
+    }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  dl(txt, name, 'application/json');
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).then(
+    () => alert('名單檔已下載，JSON 文字也已複製。手機可從分享選單或檔案 App 存取。'),
+    () => alert('名單檔已下載。手機可從瀏覽器下載項目或檔案 App 開啟。'));
 }
 function applyRoster(text) {
   let d;
   try { d = JSON.parse(text); } catch (e) { alert('讀不到內容，這不是匯出的名單檔。'); return; }
   if (!d || !Array.isArray(d.roster)) { alert('檔案裡沒有名單資料。'); return; }
   if (!confirm(`匯入 ${d.roster.filter(p => p.no || p.name).length} 位球員？目前的名單、預排表與即時紀錄都會被取代。`)) return;
-  S.fmt = d.fmt === 48 ? 48 : 40; S.qMin = S.fmt === 40 ? 10 : 12;
+  S.fmt = [32, 40, 48].includes(+d.fmt) ? +d.fmt : 40;
+  S.qMin = S.fmt === 32 ? 8 : S.fmt === 40 ? 10 : 12;
   S.w = { S: +(d.w && d.w.S) || 1.5, R: +(d.w && d.w.R) || 1 };
   S.roster = d.roster.slice(0, 15).map((p, i) => ({
     id: uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3), name: String(p.name || ''),
@@ -1101,6 +1139,10 @@ document.getElementById('impFile').addEventListener('change', e => {
   r.onerror = () => alert('檔案讀取失敗，改用「貼上文字匯入」試試。');
   r.readAsText(f); e.target.value = '';
 });
+
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(() => {}));
+}
 
 function tableRows() {
   const sug = suggestions();

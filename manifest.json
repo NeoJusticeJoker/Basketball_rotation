@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "社區籃球輪替表",
+  "short_name": "籃球輪替",
+  "description": "社區籃球比賽的上場時間輪替、計時與統計工具",
+  "lang": "zh-Hant",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#EFF1EC",
+  "theme_color": "#14171A",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
