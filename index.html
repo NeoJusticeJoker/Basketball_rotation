@@ -172,18 +172,20 @@ const LS_OLD = 'hoop-rotation-v1';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const ROLES = { S: '先發', R: '輪替' };
 const POS = ['PG', 'SG', 'SF', 'PF', 'C'];
-const ALGO = 5;      // 自動預排演算法版本：舊版排的表要提醒重排
+const ALGO = 6;      // 自動預排演算法版本：舊版排的表要提醒重排
 
 const blankRoster = () => Array.from({ length: 15 }, (_, i) =>
   ({ id: uid(), no: '', name: '', role: i < 5 ? 'S' : 'R', pos: POS[i % 5] }));
 const blankGrid = qm => Array.from({ length: 4 }, () => Array.from({ length: qm }, () => []));
+const fitGrid = (grid, qm) => Array.from({ length: 4 }, (_, q) =>
+  Array.from({ length: qm }, (_, m) => Array.isArray(grid && grid[q] && grid[q][m]) ? grid[q][m] : []));
 
 function defaults() {
   return {
-    fmt: 32, qMin: 8,
+    fmt: 40, qMin: 10,
     roster: blankRoster(),
     w: { S: 1.5, R: 1 },
-    plan: blankGrid(10), live: blankGrid(10),
+    plan: blankGrid(10), live: blankGrid(10), flex: { restMin: 2, restStarters: 5 }, templates: [],
     lv: { q: 0, acc: 0, startedAt: null, running: false, onCourt: [], written: 0 },
     tab: 'live', gq: 0, showLiveGrid: false, scope: 'all',
     planAlgo: ALGO, planScen: '',
@@ -198,7 +200,13 @@ let S = defaults();
   try {
     const o = JSON.parse(raw);
     S = Object.assign(defaults(), o);
-    if (!o.qMin) S.qMin = S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8;
+    const hasGameData = ['plan', 'live'].some(k => Array.isArray(o[k]) && o[k].some(q => q.some(m => m.length)));
+    if (o.fmt === 32 && o.qMin === 8 && !hasGameData) { S.fmt = 40; S.qMin = 10; }
+    else if (!o.qMin) S.qMin = S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8;
+    S.flex = Object.assign(defaults().flex, o.flex || {});
+    S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
+    S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
+    S.templates = Array.isArray(o.templates) ? o.templates : [];
     S.lv = Object.assign(defaults().lv, o.lv || {});
     S.w = { S: +(o.w && o.w.S) || 1.5, R: +(o.w && o.w.R) || 1 };
     // v1 → v2：板凳併入輪替、補上位置欄
@@ -208,6 +216,7 @@ let S = defaults();
       pos: POS.indexOf(p.pos) >= 0 ? p.pos : POS[i % 5]
     }));
     while (S.roster.length < 15) S.roster.push({ id: uid(), no: '', name: '', role: 'R', pos: POS[S.roster.length % 5] });
+    S.plan = fitGrid(o.plan, S.qMin); S.live = fitGrid(o.live, S.qMin);
     S.lv.running = false; S.lv.startedAt = null;   // 重新載入一律停錶
     S.stalePlan = o.planAlgo !== ALGO && S.plan.some(q => q.some(m => m.length));
     S.board = Object.assign(defaults().board, o.board || {});
@@ -245,9 +254,10 @@ function suggestions() {
    k=0 代表這段全先發在場（開節、收尾）。教練一次只換 1～2 人，先發錯開休息，
    所以場上永遠是先發與替補混編，不會整批五上五下。                     */
 const SCEN = {
-  balanced: { name: '32 分鐘均衡', desc: '每節 8 分鐘上場、2 分鐘輪休', z: [
+  balanced: { name: '均衡輪替', desc: '每節約 20% 輪休、前後交錯', z: [
     [[0, .8, 0], [.8, 1, 5]], [[0, .8, 0], [.8, 1, 5]],
     [[0, .2, 5], [.2, 1, 0]], [[0, .2, 5], [.2, 1, 0]] ] },
+  custom: { name: '自訂輪替', desc: '依下方設定輪休時間與人數', z: null },
   tight: { name: '拉鋸戰', desc: '第四節主力收尾', z: [
     [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, .3, 2], [.3, 1, 0]] ] },
   lead:  { name: '大幅領先', desc: '第四節放輪替', z: [
@@ -258,9 +268,15 @@ const SCEN = {
 const REST_ORDER = ['C', 'PF', 'SG', 'SF', 'PG'];   // 先讓內線休息，控球留到最後
 const MIN_CHUNK = 3;                                 // 一次下場休息至少幾分鐘
 
-const zonesOf = (q, key) => SCEN[key].z[q]
-  .map(([a, b, k]) => ({ from: Math.round(a * S.qMin), to: Math.round(b * S.qMin), k }))
-  .filter(z => z.to > z.from);
+const zonesOf = (q, key) => {
+  const z = key === 'custom' ? (() => {
+    const r = Math.min(S.qMin - 1, Math.max(0, +S.flex.restMin || 0)) / S.qMin;
+    const k = Math.min(5, Math.max(1, +S.flex.restStarters || 1));
+    return q < 2 ? [[0, 1 - r, 0], [1 - r, 1, k]] : [[0, r, k], [r, 1, 0]];
+  })() : SCEN[key].z[q];
+  return z.map(([a, b, k]) => ({ from: Math.round(a * S.qMin), to: Math.round(b * S.qMin), k }))
+    .filter(zone => zone.to > zone.from);
+};
 
 function autoPlan(key, onlyQ4) {
   const ps = actives();
@@ -268,11 +284,19 @@ function autoPlan(key, onlyQ4) {
   const qs = onlyQ4 ? [3] : [0, 1, 2, 3];
   qs.forEach(q => { S.plan[q] = Array.from({ length: S.qMin }, () => []); });
 
-  // 每個位置的先發與同位置替補
+  // PG/SG 共用後衛輪替池，兩個先發後衛可互相補位。
   const main = {}, subs = {};
-  POS.forEach(P => {
+  const guards = ps.filter(p => p.pos === 'PG' || p.pos === 'SG');
+  const guardStarters = guards.filter(p => p.role === 'S');
+  main.PG = guardStarters[0] || guards[0] || null;
+  main.SG = guardStarters.find(p => p.id !== (main.PG && main.PG.id))
+    || guards.find(p => p.id !== (main.PG && main.PG.id)) || null;
+  ['SF', 'PF', 'C'].forEach(P => {
     const same = ps.filter(p => p.pos === P);
     main[P] = same.find(p => p.role === 'S') || same[0] || null;
+  });
+  POS.forEach(P => {
+    const same = (P === 'PG' || P === 'SG') ? guards : ps.filter(p => p.pos === P);
     subs[P] = same.filter(p => !main[P] || p.id !== main[P].id);
   });
   const mainIds = new Set(POS.map(P => main[P] && main[P].id).filter(Boolean));
@@ -479,7 +503,54 @@ const PLAYS = [
     steps: ['2 號站籃下，左邊排雙掩護、右邊排單掩護',
             '2 號看防守者怎麼追，自己選邊出來',
             '走雙掩護那側較難追防，走單掩護那側則跑得快',
-            '1 號在弧頂持球等時機，沒有空檔就交給頂出來的長人打二次進攻'] }
+            '1 號在弧頂持球等時機，沒有空檔就交給頂出來的長人打二次進攻'] },
+  { name: '2-3 中路高位擋拆', en: '2-3 Zone · High P&R',
+    spots: [['PG', 75, 108], ['SG', 18, 82], ['SF', 132, 82], ['PF', 14, 119], ['C', 88, 62]],
+    marks: [
+      { t: 'screen', p: [[88, 62], [82, 68]] },
+      { t: 'dribble', p: [[75, 108], [84, 96], [91, 82], [84, 70]] },
+      { t: 'move', p: [[88, 62], [85, 76], [78, 84], [75, 68]] },
+      { t: 'pass', p: [[84, 70], [76, 82]] },
+      { t: 'move', p: [[18, 82], [27, 72]] }],
+    steps: ['1 號在弧頂持球，2、3 號拉開兩側，4 號站底角；5 號從肘區上提替 1 號設高位掩護。',
+            '1 號借掩護切入罰球線中央，先讀兩名底線防守者是否收縮。',
+            '5 號短順下到罰球線附近接球，形成中路 4 打 3；若中鋒補上，分球給底角或弱邊射手。'] },
+  { name: '2-3 短順下接應', en: '2-3 Zone · Short Roll',
+    spots: [['PG', 75, 108], ['SG', 18, 81], ['SF', 132, 81], ['PF', 14, 119], ['C', 55, 54]],
+    marks: [
+      { t: 'screen', p: [[55, 54], [61, 60]] },
+      { t: 'dribble', p: [[75, 108], [62, 97], [48, 84]] },
+      { t: 'move', p: [[55, 54], [64, 70], [74, 78]] },
+      { t: 'pass', p: [[48, 84], [73, 75]] },
+      { t: 'move', p: [[14, 119], [27, 103], [43, 91]] },
+      { t: 'move', p: [[18, 81], [35, 74]] }],
+    steps: ['1 號弧頂發動，5 號上提替他設側邊掩護；兩側射手維持寬度。',
+            '1 號往一側突破吸引上線與底線防守，5 號不必一路衝籃，短順下停在高位接球。',
+            '弱側 4 號沿底線切到短角落，2 號上提接應。5 號接球後可自己投、分底角，或再傳給籃下空切者。'] },
+  { name: '3-2 肘區高低位', en: '3-2 Zone · High-Low',
+    spots: [['PG', 75, 108], ['SG', 22, 78], ['SF', 128, 78], ['PF', 14, 119], ['C', 75, 57]],
+    marks: [
+      { t: 'screen', p: [[75, 57], [79, 63]] },
+      { t: 'dribble', p: [[75, 108], [65, 96], [55, 83], [66, 72]] },
+      { t: 'move', p: [[75, 57], [72, 72], [66, 83]] },
+      { t: 'pass', p: [[66, 72], [66, 84]] },
+      { t: 'move', p: [[14, 119], [34, 112], [50, 98]] },
+      { t: 'pass', p: [[66, 84], [25, 111]] }],
+    steps: ['1 號弧頂持球，5 號由罰球線上提替 1 號設掩護；4 號守住底線短角落。',
+            '1 號切進三名上線防守者之間，把球送到肘區／罰球線的 5 號手中。',
+            '底線防守上提時，4 號切到籃下或短角落接高低位傳球；若底線收縮，5 號分給兩側射手。'] },
+  { name: '3-2 底線反切', en: '3-2 Zone · Baseline Cut',
+    spots: [['PG', 75, 108], ['SG', 20, 78], ['SF', 130, 78], ['PF', 15, 118], ['C', 88, 59]],
+    marks: [
+      { t: 'screen', p: [[88, 59], [82, 65]] },
+      { t: 'dribble', p: [[75, 108], [86, 97], [98, 86]] },
+      { t: 'move', p: [[88, 59], [83, 74], [74, 82]] },
+      { t: 'move', p: [[15, 118], [30, 108], [45, 114], [58, 124]] },
+      { t: 'pass', p: [[98, 86], [58, 119]] },
+      { t: 'pass', p: [[58, 119], [130, 78]] }],
+    steps: ['1 號從弧頂發動，5 號上提設掩護；2、3 號拉到兩側，4 號從底線準備反切。',
+            '1 號借掩護往弱側肘區運球，吸引三名上線防守者移動；5 號短順下卡住中路防守。',
+            '4 號趁底線防守看球時，從底角沿底線反切到籃下。1 號先找 4 號，若底線收縮再轉傳弱側射手。'] }
 ];
 
 /* ── 幾何小工具 ── */
@@ -616,16 +687,24 @@ function liveHTML() {
 /* 某位置沒有輪替 → 那個先發會被排滿 40/48 分，先講清楚 */
 function posGaps() {
   const ps = actives(), msg = [];
-  const noSub = POS.filter(P => !ps.some(p => p.pos === P && p.role === 'R') && ps.some(p => p.pos === P));
-  const noOne = POS.filter(P => !ps.some(p => p.pos === P));
+  const guards = ps.filter(p => p.pos === 'PG' || p.pos === 'SG');
+  const noOne = ['SF', 'PF', 'C'].filter(P => !ps.some(p => p.pos === P));
+  if (!guards.length) noOne.unshift('PG／SG');
   if (noOne.length) msg.push(`${noOne.join('、')} 沒有登記任何人，會由其他位置的人頂上。`);
-  if (noSub.length) msg.push(`${noSub.join('、')} 沒有輪替，這幾個位置的先發會被排滿 ${gameMin()} 分。`);
+  const noSub = ['SF', 'PF', 'C'].filter(P => {
+    const group = ps.filter(p => p.pos === P);
+    return group.length && !group.some(p => p.role === 'R');
+  });
+  if (guards.length && !guards.some(p => p.role === 'R')) noSub.unshift('PG／SG');
+  if (noSub.length) msg.push(`${noSub.join('、')} 沒有輪替，相關先發可能會被排較多分鐘。`);
   return msg;
 }
 
 function planHTML() {
   const ps = actives(); if (!ps.length) return empty();
   const gaps = posGaps();
+  const restM = Math.max(0, S.qMin - Math.round(S.qMin * .8));
+  const playM = S.qMin - restM;
   return `
     <h2 class="sec">自動預排</h2>
     ${gaps.length ? `<p class="warn" style="margin:0 0 10px">${gaps.join('<br>')}</p>` : ''}
@@ -637,8 +716,16 @@ function planHTML() {
     <div class="row">
       ${Object.keys(SCEN).map(k => `<button class="btn" data-scen="${k}">${SCEN[k].name}<small>${SCEN[k].desc}</small></button>`).join('')}
     </div>
+    <h2 class="sec">自訂輪休</h2>
+    <div class="wrow">
+      <div><label>Q1、Q2 末段／Q3、Q4 開頭休息（分鐘）</label>
+        <input type="number" inputmode="numeric" min="0" max="${S.qMin - 1}" value="${S.flex.restMin}" data-flex="restMin"></div>
+      <div><label>同時休息的先發人數（1–5）</label>
+        <input type="number" inputmode="numeric" min="1" max="5" value="${S.flex.restStarters}" data-flex="restStarters"></div>
+    </div>
+    <p class="hint">調好後按「自訂輪替」套用。Q1、Q2 在每節末段輪休；Q3、Q4 在每節開頭輪休。也可直接塗改下方每分鐘格子。</p>
     ${S.planScen ? `<p class="hint" style="margin-top:6px">目前套用：<strong>${esc(S.planScen)}</strong>${S.stalePlan ? '' : ' · 已依區段排定'}</p>` : ''}
-    <p class="hint">社區賽預設採<strong>32 分鐘、每節 8 分鐘</strong>的均衡安排：Q1、Q2 先打 8 分鐘再休 2 分鐘；Q3、Q4 先休 2 分鐘再打 8 分鐘。中場的休息時間依你們賽制另計。也保留拉鋸戰、領先、落後情境，可按需要改排；排完之後<strong>每一格都可以自己塗改</strong>。</p>
+  <p class="hint">均衡安排依整場賽制計算：每節上場約 ${playM} 分、輪休 ${restM} 分；Q1、Q2 休在末段，Q3、Q4 休在開頭。40 分鐘制下，先發預計上場約 <strong>${playM * 4} 分鐘</strong>、輪休 8 分鐘。可調整輪休時間、人數，也可直接塗改每一格。</p>
     <div class="row" style="margin:14px 0 10px">
       <button class="btn ghost" data-act="undo">復原上一步</button>
       <button class="btn ghost" data-act="clearQ">清空本節</button>
@@ -720,10 +807,19 @@ function setupHTML() {
       <select data-f="pos" data-i="${i}">${POS.map(k => `<option value="${k}"${p.pos === k ? ' selected' : ''}>${k}</option>`).join('')}</select>
       <select data-f="role" data-i="${i}">${Object.keys(ROLES).map(k => `<option value="${k}"${p.role === k ? ' selected' : ''}>${ROLES[k]}</option>`).join('')}</select>
     </div>`).join('');
+  const templates = S.templates.map((t, i) => `<div class="row" style="margin:6px 0">
+    <button class="btn" data-template-apply="${i}" style="flex:2">套用：${esc(t.name)}</button>
+    <button class="btn ghost" data-template-delete="${i}" aria-label="刪除模板">刪除</button>
+  </div>`).join('');
   return `
+  <h2 class="sec">比賽模板</h2>
+  <button class="btn hi wide" data-act="saveTemplate">儲存目前配置為模板</button>
+  ${templates || '<p class="hint">尚未儲存模板。模板包含賽制、名單、預排表和已儲存的自訂戰術。</p>'}
+  <p class="hint">模板存在此裝置。跨裝置搬移請用下方「匯出完整備份」；正在使用的戰術板需先按「存成我的戰術」才會納入。</p>
+
   <h2 class="sec">賽制</h2>
   <div class="row">
-    <button class="btn ${S.fmt === 32 ? 'solid' : ''}" data-act="fmt" data-v="32">社區賽<small>32 分鐘 · 4 節 × 8 分</small></button>
+    <button class="btn ${S.fmt === 32 ? 'solid' : ''}" data-act="fmt" data-v="32">32 分鐘短制<small>4 節 × 8 分</small></button>
     <button class="btn ${S.fmt === 40 ? 'solid' : ''}" data-act="fmt" data-v="40">40 分鐘制<small>4 節 × 10 分</small></button>
     <button class="btn ${S.fmt === 48 ? 'solid' : ''}" data-act="fmt" data-v="48">48 分鐘制<small>4 節 × 12 分</small></button>
   </div>
@@ -731,20 +827,20 @@ function setupHTML() {
   <h2 class="sec">名單（背號與姓名都可留空）</h2>
   <div class="rhead"><span>背號</span><span>姓名</span><span>位置</span><span>角色</span></div>
   ${rows}
-  <p class="hint">自動預排會照位置各派一人，所以五個位置最好都要有先發，也各留一個輪替。背號只接受 0–9 數字，最多 3 位。</p>
+  <p class="hint">自動預排會照位置分配；PG、SG 會共用後衛輪替池，兩位先發後衛可以互相補位。背號只接受 0–9 數字，最多 3 位。</p>
 
   <h2 class="sec">角色權重</h2>
   <div class="wrow">${['S', 'R'].map(k => `<div><label>${ROLES[k]}</label>
     <input inputmode="decimal" value="${S.w[k]}" data-w="${k}"></div>`).join('')}</div>
   <p class="hint">權重只影響「統計」頁的建議分鐘，不會改動預排表。</p>
 
-  <h2 class="sec">名單存檔</h2>
+  <h2 class="sec">完整備份（賽制、名單、預排與自訂戰術）</h2>
   <div class="row">
-    <button class="btn" data-act="expRoster">匯出名單</button>
-    <button class="btn" data-act="impRoster">匯入名單</button>
+    <button class="btn" data-act="expRoster">匯出完整備份</button>
+    <button class="btn" data-act="impRoster">匯入完整備份</button>
   </div>
-  <button class="btn wide ghost" data-act="impPaste" style="margin-top:8px">貼上文字匯入</button>
-  <p class="hint">手機可用「匯出名單」開啟分享選單，存到「檔案」或傳給隊友；也會複製一份文字備份。匯入時可選檔案，或貼上備份文字。資料仍保存在目前這台裝置的瀏覽器；需要跨裝置同步時，請用分享／備份檔案轉移。</p>
+  <button class="btn wide ghost" data-act="impPaste" style="margin-top:8px">貼上備份文字匯入</button>
+  <p class="hint">手機可從分享選單存到「檔案」或傳給隊友。匯入完整備份會取代賽制、名單、預排與自訂戰術，並清除即時紀錄。</p>
 
   <h2 class="sec">資料</h2>
   <p class="hint">GitHub Pages 使用 HTTPS，可離線開啟並加入手機主畫面。iPhone／iPad：Safari 分享按鈕 →「加入主畫面」；Android：瀏覽器選單 →「安裝應用程式」或「加到主畫面」。每次操作自動存在這支裝置的瀏覽器，清除瀏覽器資料會一併消失，重要場次請先匯出名單並下載 CSV。</p>
@@ -903,6 +999,16 @@ document.getElementById('tabs').addEventListener('click', e => {
 });
 
 view.addEventListener('click', e => {
+  const applyT = e.target.closest('[data-template-apply]');
+  if (applyT) { applyTemplate(+applyT.dataset.templateApply); return; }
+  const deleteT = e.target.closest('[data-template-delete]');
+  if (deleteT) {
+    const i = +deleteT.dataset.templateDelete;
+    if (confirm(`刪除模板「${S.templates[i].name}」？`)) {
+      S.templates.splice(i, 1); save(true); render();
+    }
+    return;
+  }
   const sub = e.target.closest('[data-sub]');
   if (sub) {
     const id = sub.dataset.sub, i = S.lv.onCourt.indexOf(id);
@@ -984,6 +1090,7 @@ view.addEventListener('click', e => {
     const used = ['plan', 'live'].some(s => S[s].some(qq => qq.some(m => m.length)));
     if (used && !confirm('改賽制會清空預排表與即時紀錄，確定？')) return;
     S.fmt = v; S.qMin = v === 32 ? 8 : v === 40 ? 10 : 12;
+    S.flex.restMin = Math.min(S.qMin - 1, S.flex.restMin);
     S.plan = blankGrid(S.qMin); S.live = blankGrid(S.qMin);
     S.lv = Object.assign(defaults().lv, { onCourt: S.lv.onCourt });
     undoStack.length = 0; save(true); render();
@@ -1020,6 +1127,12 @@ view.addEventListener('click', e => {
     save(true); render();
   }
   else if (act === 'pngBoard') pngBoard();
+  else if (act === 'saveTemplate') {
+    const name = prompt('替目前配置取個模板名稱：', '社區賽');
+    if (!name || !name.trim()) return;
+    S.templates.push(captureTemplate(name.trim().slice(0, 32)));
+    save(true); render(); alert('比賽模板已儲存。');
+  }
   else if (act === 'csv') downloadCSV();
   else if (act === 'copy') copyTable();
   else if (act === 'expRoster') exportRoster();
@@ -1054,12 +1167,20 @@ view.addEventListener('input', e => {
     const v = parseFloat(t.value);
     S.w[t.dataset.w] = isNaN(v) || v < 0 ? 0 : v;
     save();
+  } else if (t.dataset.flex) {
+    const max = t.dataset.flex === 'restMin' ? S.qMin - 1 : 5;
+    const min = t.dataset.flex === 'restMin' ? 0 : 1;
+    const value = Math.floor(+t.value || 0);
+    S.flex[t.dataset.flex] = Math.min(max, Math.max(min, value));
+    t.value = S.flex[t.dataset.flex];
+    save();
   }
 });
 view.addEventListener('change', e => {          // select 只發 change
   const t = e.target;
   if (t.tagName === 'SELECT' && t.dataset.f) { S.roster[+t.dataset.i][t.dataset.f] = t.value; save(true); render(); }
   else if (t.dataset.f === 'no') { S.roster[+t.dataset.i].no = t.value.replace(/\D/g, '').slice(0, 3); t.value = S.roster[+t.dataset.i].no; save(true); }
+  else if (t.dataset.flex) save(true);
 });
 
 /* ── 塗格子：按住橫向拖曳連塗 ── */
@@ -1095,42 +1216,81 @@ function dl(text, name, mime) {
   a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+function captureTemplate(name) {
+  return {
+    name, savedAt: new Date().toISOString(), fmt: S.fmt, qMin: S.qMin,
+    roster: S.roster.map(p => Object.assign({}, p)), w: Object.assign({}, S.w),
+    flex: Object.assign({}, S.flex), plan: S.plan.map(q => q.map(m => m.slice())),
+    planScen: S.planScen, planAlgo: S.planAlgo, plays: JSON.parse(JSON.stringify(S.plays))
+  };
+}
+function applyTemplate(i) {
+  const t = S.templates[i]; if (!t) return;
+  if (!confirm(`套用「${t.name}」？會替換賽制、名單、預排和自訂戰術，並清除目前的即時紀錄。`)) return;
+  S.fmt = [32, 40, 48].includes(+t.fmt) ? +t.fmt : 32;
+  S.qMin = [8, 10, 12].includes(+t.qMin) ? +t.qMin : (S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8);
+  S.roster = (t.roster || []).slice(0, 15).map((p, j) => ({
+    id: p.id || uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3),
+    name: String(p.name || ''), pos: POS.includes(p.pos) ? p.pos : POS[j % 5], role: p.role === 'S' ? 'S' : 'R'
+  }));
+  while (S.roster.length < 15) S.roster.push({ id: uid(), no: '', name: '', role: 'R', pos: POS[S.roster.length % 5] });
+  S.w = { S: +(t.w && t.w.S) || 1.5, R: +(t.w && t.w.R) || 1 };
+  S.flex = Object.assign(defaults().flex, t.flex || {});
+  S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
+  S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
+  S.plan = fitGrid(t.plan, S.qMin); S.planScen = t.planScen || '';
+  S.planAlgo = t.planAlgo || ALGO; S.stalePlan = S.planAlgo !== ALGO && S.plan.some(q => q.some(m => m.length));
+  S.plays = Array.isArray(t.plays) ? JSON.parse(JSON.stringify(t.plays)) : [];
+  S.live = blankGrid(S.qMin); S.lv = defaults().lv; S.board = defaults().board;
+  S.tab = 'plan'; S.gq = 0; undoStack.length = 0;
+  save(true); render();
+}
 async function exportRoster() {
-  const data = { app: 'hoop-rotation', v: 2, fmt: S.fmt, w: S.w, plays: S.plays,
-    roster: S.roster.map(p => ({ no: p.no, name: p.name, pos: p.pos, role: p.role })) };
+  const data = {
+    app: 'hoop-rotation', v: 3, fmt: S.fmt, qMin: S.qMin, w: S.w, flex: S.flex,
+    roster: S.roster.map(p => Object.assign({}, p)),
+    plan: S.plan.map(q => q.map(m => m.slice())), planScen: S.planScen, planAlgo: S.planAlgo,
+    plays: S.plays, templates: S.templates
+  };
   const txt = JSON.stringify(data);
-  const name = `名單_${new Date().toISOString().slice(0, 10)}.json`;
+  const name = `比賽備份_${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([txt], name, { type: 'application/json' });
   try {
     if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ title: '籃球輪替名單', files: [file] });
+      await navigator.share({ title: '籃球輪替完整備份', files: [file] });
       if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(() => {});
       return;
     }
   } catch (e) { if (e.name === 'AbortError') return; }
   dl(txt, name, 'application/json');
   if (navigator.clipboard) navigator.clipboard.writeText(txt).then(
-    () => alert('名單檔已下載，JSON 文字也已複製。手機可從分享選單或檔案 App 存取。'),
-    () => alert('名單檔已下載。手機可從瀏覽器下載項目或檔案 App 開啟。'));
+    () => alert('完整備份已下載，JSON 文字也已複製。'),
+    () => alert('完整備份已下載。'));
 }
 function applyRoster(text) {
   let d;
   try { d = JSON.parse(text); } catch (e) { alert('讀不到內容，這不是匯出的名單檔。'); return; }
   if (!d || !Array.isArray(d.roster)) { alert('檔案裡沒有名單資料。'); return; }
-  if (!confirm(`匯入 ${d.roster.filter(p => p.no || p.name).length} 位球員？目前的名單、預排表與即時紀錄都會被取代。`)) return;
+  if (!confirm(`匯入 ${d.roster.filter(p => p && (p.no || p.name)).length} 位球員？目前賽制、名單、預排與自訂戰術會被取代，即時紀錄會清空。`)) return;
   S.fmt = [32, 40, 48].includes(+d.fmt) ? +d.fmt : 40;
-  S.qMin = S.fmt === 32 ? 8 : S.fmt === 40 ? 10 : 12;
+  S.qMin = [8, 10, 12].includes(+d.qMin) ? +d.qMin : S.fmt === 32 ? 8 : S.fmt === 40 ? 10 : 12;
   S.w = { S: +(d.w && d.w.S) || 1.5, R: +(d.w && d.w.R) || 1 };
   S.roster = d.roster.slice(0, 15).map((p, i) => ({
-    id: uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3), name: String(p.name || ''),
+    id: d.v >= 3 && p.id ? String(p.id) : uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3), name: String(p.name || ''),
     pos: POS.indexOf(p.pos) >= 0 ? p.pos : POS[i % 5], role: p.role === 'S' ? 'S' : 'R'
   }));
   while (S.roster.length < 15) S.roster.push({ id: uid(), no: '', name: '', role: 'R', pos: POS[S.roster.length % 5] });
   if (Array.isArray(d.plays)) S.plays = d.plays;
-  S.plan = blankGrid(S.qMin); S.live = blankGrid(S.qMin);
-  S.lv = defaults().lv; S.board = defaults().board; undoStack.length = 0;
+  S.flex = Object.assign(defaults().flex, d.flex || {});
+  S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
+  S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
+  S.plan = d.v >= 3 ? fitGrid(d.plan, S.qMin) : blankGrid(S.qMin);
+  S.planScen = d.planScen || ''; S.planAlgo = d.planAlgo || ALGO; S.stalePlan = false;
+  if (Array.isArray(d.templates)) S.templates = d.templates;
+  S.live = blankGrid(S.qMin);
+  S.lv = defaults().lv; S.board = defaults().board; S.gq = 0; S.tab = 'setup'; undoStack.length = 0;
   save(true); render();
-  alert('名單已匯入。');
+  alert('完整備份已匯入。');
 }
 document.getElementById('impFile').addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return;
