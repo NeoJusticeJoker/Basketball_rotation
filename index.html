@@ -172,7 +172,7 @@ const LS_OLD = 'hoop-rotation-v1';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const ROLES = { S: '先發', R: '輪替' };
 const POS = ['PG', 'SG', 'SF', 'PF', 'C'];
-const ALGO = 10;     // 自動預排演算法版本：舊版排的表要提醒重排
+const ALGO = 12;     // 自動預排演算法版本：舊版排的表要提醒重排
 
 const blankRoster = () => Array.from({ length: 15 }, (_, i) =>
   ({ id: uid(), no: '', name: '', role: i < 5 ? 'S' : 'R', pos: POS[i % 5] }));
@@ -258,15 +258,20 @@ function suggestions() {
    每節切成若干「輪換區」：[起, 迄, 這段安排休息的先發人數]，比例存，40/48 制通用。
    k=0 代表先發全留場；人人有份模式則忽略位置與先發身分，按累計分鐘輪替。 */
 const SCEN = {
-  equal: { name: '人人有份', desc: '至少留 2 名先發，其餘盡量平均', z: null },
-  balanced: { name: '均衡輪替', desc: '每段約 5–6 分鐘，先發替補交錯', z: null },
+  equal: { name: '人人有份', desc: '每段約 5–6 分鐘，至少留 2 名先發', z: null },
+  balanced: { name: '均衡輪替', desc: 'Q1 先發打 8 分鐘，替補輪替延續全場', z: [
+    [[0, .8, 0], [.8, 1, 3]], [[0, .2, 3], [.2, .4, 0], [.4, 1, 2]],
+    [[0, .8, 2], [.8, 1, 3]], [[0, .2, 3], [.2, 1, 2]] ] },
   custom: { name: '自訂輪替', desc: '依下方設定輪休時間與人數', z: null },
-  tight: { name: '拉鋸戰', desc: '第四節主力收尾', z: [
-    [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, .3, 2], [.3, 1, 0]] ] },
-  lead:  { name: '大幅領先', desc: '第四節放輪替', z: [
-    [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, .3, 2], [.3, 1, 4]] ] },
-  trail: { name: '大幅落後', desc: '第四節全輪替', z: [
-    [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, 1, 4]] ] }
+  tight: { name: '拉鋸戰', desc: 'Q1 8 分鐘先發主打、Q4 最後 2 分鐘全主力收尾', z: [
+    [[0, .8, 0], [.8, 1, 2]], [[0, .2, 2], [.2, .4, 0], [.4, .8, 2], [.8, 1, 0]],
+    [[0, .8, 3], [.8, 1, 2]], [[0, .2, 2], [.2, .8, 2], [.8, 1, 0]] ] },
+  lead:  { name: '大幅領先', desc: '各節都讓替補輪替，第四節增加替補時段', z: [
+    [[0, .8, 0], [.8, 1, 3]], [[0, .2, 3], [.2, .4, 0], [.4, 1, 2]],
+    [[0, .8, 2], [.8, 1, 3]], [[0, .2, 3], [.2, .6, 3], [.6, 1, 2]] ] },
+  trail: { name: '大幅落後', desc: '先給替補輪替，第四節最後 2 分鐘全主力收尾', z: [
+    [[0, .8, 0], [.8, 1, 3]], [[0, .2, 3], [.2, .4, 0], [.4, 1, 2]],
+    [[0, .8, 2], [.8, 1, 3]], [[0, .2, 3], [.2, .6, 3], [.6, .8, 2], [.8, 1, 0]] ] }
 };
 const REST_ORDER = ['C', 'PF', 'SG', 'SF', 'PG'];   // 先讓內線休息，控球留到最後
 const MIN_CHUNK = 3;                                 // 一次下場休息至少幾分鐘
@@ -275,7 +280,7 @@ const zonesOf = (q, key) => {
   const z = key === 'custom' ? (() => {
     const r = Math.min(S.qMin - 1, Math.max(0, +S.flex.restMin || 0)) / S.qMin;
     const k = Math.min(5, Math.max(1, +S.flex.restStarters || 1));
-    return q < 2 ? [[0, 1 - r, 0], [1 - r, 1, k]] : [[0, r, k], [r, 1, 0]];
+    return q % 2 === 0 ? [[0, 1 - r, 0], [1 - r, 1, k]] : [[0, r, k], [r, 1, 0]];
   })() : SCEN[key].z[q];
   return z.map(([a, b, k]) => ({ from: Math.round(a * S.qMin), to: Math.round(b * S.qMin), k }))
     .filter(zone => zone.to > zone.from);
@@ -287,102 +292,40 @@ function autoPlan(key, onlyQ4) {
   const qs = onlyQ4 ? [3] : [0, 1, 2, 3];
   qs.forEach(q => { S.plan[q] = Array.from({ length: S.qMin }, () => []); });
 
-  if (key === 'balanced') {
-    const mins = {}; ps.forEach(p => mins[p.id] = minutesOf('plan', p.id).total);
-    const starters = ps.filter(p => p.role === 'S');
-    const reserves = ps.filter(p => p.role !== 'S');
-    const minStarters = Math.min(2, starters.length);
-    const desiredBench = reserves.length <= 3 ? 1 : reserves.length <= 6 ? 2 : 3;
-    const benchCount = reserves.length
-      ? Math.max(5 - starters.length, Math.min(desiredBench, reserves.length, 5 - minStarters))
-      : 0;
-    const starterCount = Math.min(starters.length, 5 - benchCount);
-    const reserveCount = 5 - starterCount;
-    const combinations = (arr, count) => {
-      if (count < 0 || count > arr.length) return [];
-      if (count === 0) return [[]];
-      const out = [];
-      const walk = (from, picked) => {
-        if (picked.length === count) { out.push(picked); return; }
-        for (let i = from; i <= arr.length - (count - picked.length); i++)
-          walk(i + 1, picked.concat(arr[i]));
-      };
-      walk(0, []);
-      return out;
-    };
-    const starterGroups = combinations(starters, starterCount);
-    const reserveGroups = combinations(reserves, reserveCount);
-    const priorLineup = onlyQ4 ? new Set(S.plan[2][S.qMin - 1] || []) : new Set();
-    const positionDeficit = lineup => {
-      const guards = lineup.filter(p => p.pos === 'PG' || p.pos === 'SG').length;
-      const forwards = lineup.filter(p => p.pos === 'SF' || p.pos === 'PF').length;
-      const centers = lineup.filter(p => p.pos === 'C').length;
-      return Math.max(0, 2 - guards) + Math.max(0, 2 - forwards) + Math.max(0, 1 - centers);
-    };
-    const startAbs = onlyQ4 ? 3 * S.qMin : 0;
-    const endAbs = 4 * S.qMin;
-    let prev = priorLineup;
-    const totalMinutes = endAbs - startAbs;
-    const shiftCount = Math.ceil(totalMinutes / 6);
-    const baseShift = Math.floor(totalMinutes / shiftCount);
-    const longerShifts = totalMinutes % shiftCount;
-    let start = startAbs;
-    for (let shift = 0; shift < shiftCount; shift++) {
-      const shiftLength = baseShift + (shift < longerShifts ? 1 : 0);
-      const shiftStart = start, shiftEnd = start + shiftLength;
-      start = shiftEnd;
-      let best = null, bestScore = Infinity;
-      starterGroups.forEach(sg => reserveGroups.forEach(rg => {
-        const lineup = sg.concat(rg);
-        if (lineup.length !== 5) return;
-        const minutesCost = lineup.reduce((sum, p) => sum + mins[p.id], 0);
-        const positionCost = positionDeficit(lineup) * 100;
-        const continuityCost = lineup.reduce((sum, p) => sum + (prev.has(p.id) ? 0 : 2.5), 0);
-        const score = minutesCost + positionCost + continuityCost;
-        if (score < bestScore) { best = lineup; bestScore = score; }
-      }));
-      if (!best) continue;
-      for (let abs = shiftStart; abs < shiftEnd; abs++) {
-        const q = Math.floor(abs / S.qMin), m = abs % S.qMin;
-        S.plan[q][m] = best.map(p => p.id);
-      }
-      best.forEach(p => mins[p.id] += shiftEnd - shiftStart);
-      prev = new Set(best.map(p => p.id));
-    }
-    S.planAlgo = ALGO; S.stalePlan = false;
-    S.planScen = SCEN[key].name + (onlyQ4 ? '（只換第 4 節）' : '（全場）');
-    return true;
-  }
-
   if (key === 'equal') {
     const mins = {}; ps.forEach(p => mins[p.id] = minutesOf('plan', p.id).total);
     let prev = onlyQ4 ? new Set(S.plan[2][S.qMin - 1] || []) : new Set();
     let rotation = 0;
     const starters = ps.filter(p => p.role === 'S');
-    qs.forEach(q => {
-      for (let m = 0; m < S.qMin; m += 2) {
-        const len = Math.min(2, S.qMin - m);
-        const ranked = ps.slice().sort((a, b) => {
-          if (mins[a.id] !== mins[b.id]) return mins[a.id] - mins[b.id];
-          if (prev.has(a.id) !== prev.has(b.id)) return prev.has(a.id) ? -1 : 1;
-          const ia = (ps.indexOf(a) - rotation % ps.length + ps.length) % ps.length;
-          const ib = (ps.indexOf(b) - rotation % ps.length + ps.length) % ps.length;
-          return ia - ib;
-        });
-        const chosen = ranked.slice(0, 5);
-        const minStarters = Math.min(2, starters.length);
-        while (chosen.filter(p => p.role === 'S').length < minStarters) {
-          const nextStarter = ranked.find(p => p.role === 'S' && !chosen.includes(p));
-          const replace = chosen.slice().reverse().find(p => p.role !== 'S');
-          if (!nextStarter || !replace) break;
-          chosen.splice(chosen.indexOf(replace), 1, nextStarter);
-        }
-        const lineup = chosen.map(p => p.id);
-        for (let k = m; k < m + len; k++) S.plan[q][k] = lineup.slice();
-        lineup.forEach(id => mins[id] += len);
-        prev = new Set(lineup); rotation++;
+    const startAbs = onlyQ4 ? 3 * S.qMin : 0, endAbs = 4 * S.qMin;
+    const total = endAbs - startAbs, shifts = Math.ceil(total / 6);
+    const base = Math.floor(total / shifts), longer = total % shifts;
+    let start = startAbs;
+    for (let shift = 0; shift < shifts; shift++) {
+      const len = base + (shift < longer ? 1 : 0), end = start + len;
+      const ranked = ps.slice().sort((a, b) => {
+        if (mins[a.id] !== mins[b.id]) return mins[a.id] - mins[b.id];
+        if (prev.has(a.id) !== prev.has(b.id)) return prev.has(a.id) ? -1 : 1;
+        const ia = (ps.indexOf(a) - rotation % ps.length + ps.length) % ps.length;
+        const ib = (ps.indexOf(b) - rotation % ps.length + ps.length) % ps.length;
+        return ia - ib;
+      });
+      const chosen = ranked.slice(0, 5);
+      const minStarters = Math.min(2, starters.length);
+      while (chosen.filter(p => p.role === 'S').length < minStarters) {
+        const nextStarter = ranked.find(p => p.role === 'S' && !chosen.includes(p));
+        const replace = chosen.slice().reverse().find(p => p.role !== 'S');
+        if (!nextStarter || !replace) break;
+        chosen.splice(chosen.indexOf(replace), 1, nextStarter);
       }
-    });
+      const lineup = chosen.map(p => p.id);
+      for (let abs = start; abs < end; abs++) {
+        const q = Math.floor(abs / S.qMin), m = abs % S.qMin;
+        S.plan[q][m] = lineup.slice();
+      }
+      lineup.forEach(id => mins[id] += len);
+      prev = new Set(lineup); rotation++; start = end;
+    }
     S.planAlgo = ALGO; S.stalePlan = false;
     S.planScen = SCEN[key].name + (onlyQ4 ? '（只換第 4 節）' : '（全場）');
     return true;
@@ -427,6 +370,8 @@ function autoPlan(key, onlyQ4) {
   // 同一人兩段休息之間至少要打 MIN_CHUNK 分鐘；緊鄰的休息可以接續延長，不算違規
   const gapOK = (P, from, dir) => {
     for (let x = from, n = 0; x >= 0 && x < 4 * S.qMin; x += dir, n++) {
+      if (dir < 0 && x < 2 * S.qMin) return true;  // 中場休息視為恢復，不跨中場檢查
+      if (dir > 0 && x >= 2 * S.qMin) return true;
       if (absRest[x] && absRest[x].has(P)) return n === 0 || n >= MIN_CHUNK;
       if (n + 1 >= MIN_CHUNK) return true;
     }
@@ -445,7 +390,9 @@ function autoPlan(key, onlyQ4) {
     const segs = [];                               // 切成時間上連續的段
     idx.forEach(i => {
       const s = segs[segs.length - 1];
-      if (s && tl[i].abs === tl[s[s.length - 1]].abs + 1) s.push(i); else segs.push([i]);
+      const prevZone = s && tl[s[s.length - 1]];
+      const halfTimeBreak = prevZone && prevZone.q === 1 && tl[i].q === 2;
+      if (s && !halfTimeBreak && tl[i].abs === prevZone.abs + 1) s.push(i); else segs.push([i]);
     });
     segs.forEach(seg => {
       let p = 0, first = true;
@@ -473,11 +420,12 @@ function autoPlan(key, onlyQ4) {
   tl.forEach((c, i) => restAt[c.q + '_' + c.m] = rest[i]);
   const mins = {}; ps.forEach(p => mins[p.id] = minutesOf('plan', p.id).total);
   const filler = {};
-  let prev = new Set();          // 上一分鐘在場上的人：優先讓他續打，避免出現一分鐘的碎片
+  let prev = onlyQ4 ? new Set(S.plan[2][S.qMin - 1] || []) : new Set();
   const fewest = arr => arr.slice().sort((a, b) =>
     (prev.has(b.id) - prev.has(a.id)) || (mins[a.id] - mins[b.id]) || a.id.localeCompare(b.id))[0];
 
   qs.forEach(q => {
+    if (q === 2) { POS.forEach(P => filler[P] = null); prev = new Set(); }
     for (let m = 0; m < S.qMin; m++) {
       const r = restAt[q + '_' + m] || new Set();
       const used = new Set();
@@ -629,64 +577,92 @@ const PLAYS = [
             '走雙掩護那側較難追防，走單掩護那側則跑得快',
             '1 號在弧頂持球等時機，沒有空檔就交給頂出來的長人打二次進攻'] },
   { name: '2-3 中路策應底線切入', en: '2-3 Zone · High Post Cut',
-    spots: [['PG', 75, 112], ['SG', 29, 67], ['SF', 9, 23], ['PF', 112, 31], ['C', 75, 30]],
-    defense: [[56, 56], [94, 56], [56, 31], [94, 31], [75, 22]],
+    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 122, 68], ['C', 75, 30]],
+    defense: [[52, 73], [98, 73], [32, 39], [118, 39], [75, 25]],
     marks: [
-      { t: 'move', p: [[75, 30], [75, 52]], phase: 0 },
+      { t: 'move', p: [[75, 30], [75, 52]], actorIndex: 4, phase: 0 },
       { t: 'pass', p: [[75, 112], [75, 52]], phase: 0 },
-      { t: 'move', p: [[75, 112], [75, 79], [75, 41], [91, 24], [141, 23]], phase: 1 },
-      { t: 'move', p: [[112, 31], [124, 40], [128, 62]], phase: 1 },
+      { t: 'move', p: [[75, 112], [75, 79], [75, 41], [91, 24], [141, 23]], actorIndex: 0, phase: 1 },
+      { t: 'move', p: [[122, 68], [130, 77]], actorIndex: 3, phase: 1 },
       { t: 'pass', p: [[75, 52], [141, 23]], phase: 2 },
       { t: 'pass', p: [[141, 23], [9, 23]], phase: 3 }],
     defenseMoves: [
-      { defender: 4, phase: 1, p: [[75, 22], [75, 43]] },
-      { defender: 2, phase: 1, p: [[56, 31], [61, 43]] }],
-    steps: ['1 號弧頂持球，5 號從低位上提到中路要球；2 號留左翼、3 號守左底角，4 號在右側低位。防守按 2-3 排列：D1、D2 在上線肘區，D3、D4 兩側低位，D5 籃下中間。',
+      { defender: 0, phase: 0, p: [[52, 73], [63, 63]] },
+      { defender: 1, phase: 0, p: [[98, 73], [87, 63]] },
+      { defender: 4, phase: 0, p: [[75, 25], [75, 45]] },
+      { defender: 2, phase: 1, p: [[32, 39], [52, 45], [69, 39]] },
+      { defender: 3, phase: 1, p: [[118, 39], [99, 42], [82, 31]] },
+      { defender: 4, phase: 1, p: [[75, 45], [78, 31]] },
+      { defender: 3, phase: 2, p: [[82, 31], [119, 29], [137, 24]] },
+      { defender: 0, phase: 3, p: [[63, 63], [50, 60], [42, 55]] },
+      { defender: 1, phase: 3, p: [[87, 63], [78, 57]] },
+      { defender: 2, phase: 3, p: [[69, 39], [35, 31], [12, 24]] },
+      { defender: 3, phase: 3, p: [[137, 24], [109, 25], [84, 29], [75, 31]] }],
+    steps: ['1 號弧頂持球，5 號從低位上提到中路要球；2、3 號分站兩側底角，4 號在右側翼。防守按 2-3 排列：D1、D2 在罰球線外上線；D3、D4 在兩側底角附近，D5 守籃下中央。',
             '1 號把球傳給中路的 5 號後，直接切向籃框找上籃。沒接到球就繞到對側底角，並由 4 號拉到側翼，把底線空出來。',
             '5 號先回傳給繞到底角的 1 號；若防守再往球側收縮，1 號轉移給底角 3 號出手。動畫顯示底線防守補位。'] },
   { name: '2-3 左側45度擋拆', en: '2-3 Zone · Left Slot P&R',
-    spots: [['PG', 75, 112], ['SG', 24, 65], ['SF', 141, 23], ['PF', 123, 65], ['C', 75, 52]],
-    defense: [[56, 56], [94, 56], [56, 31], [94, 31], [75, 22]],
+    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 123, 68], ['C', 75, 52]],
+    defense: [[52, 73], [98, 73], [32, 39], [118, 39], [75, 25]],
     marks: [
       { t: 'screen', p: [[75, 52], [55, 81]], phase: 0 },
-      { t: 'dribble', p: [[75, 112], [64, 97], [51, 82], [45, 69]], phase: 1 },
-      { t: 'move', p: [[75, 52], [55, 81], [59, 66]], phase: 1 },
-      { t: 'pass', p: [[45, 69], [24, 65]], phase: 2 }],
+      { t: 'dribble', p: [[75, 112], [64, 97], [51, 82], [45, 69]], actorIndex: 0, phase: 1 },
+      { t: 'move', p: [[75, 52], [55, 81], [59, 66], [64, 47], [70, 29], [75, 20]], actorIndex: 4, phase: 1 },
+      { t: 'pass', p: [[45, 69], [9, 23]], phase: 2 }],
     defenseMoves: [
-      { defender: 0, phase: 1, p: [[56, 56], [49, 72]] },
-      { defender: 4, phase: 1, p: [[75, 22], [64, 42]] }],
-    steps: ['1 號帶球往左側 45 度攻；5 號由高位移出來卡位，2 號在左翼保持傳球空間，3、4 號分居右側。防守按 2-3 排列：D1、D2 在上線肘區，D3、D4 兩側低位，D5 籃下中間。',
-            '1 號利用 5 號掩護進入罰球線附近，可急停拋投或跳投；防守中鋒上提，5 號順下接應。',
-            '若原本照顧 2 號的左側上線防守（D1）離開位置協防 1 號，就把球傳給左翼 2 號出手。動畫同步顯示防守補位。'] },
+      { defender: 0, phase: 1, p: [[52, 73], [48, 68], [47, 62]] },
+      { defender: 1, phase: 1, p: [[98, 73], [84, 66]] },
+      { defender: 2, phase: 1, p: [[32, 39], [45, 52], [55, 61]] },
+      { defender: 4, phase: 1, p: [[75, 25], [66, 39], [64, 48]] },
+      { defender: 3, phase: 1, p: [[118, 39], [88, 34]] },
+      { defender: 2, phase: 2, p: [[55, 61], [35, 38], [12, 24]] }],
+    steps: ['1 號弧頂持球，2、3 號分站兩側底角，4 號拉到右側翼，5 號站高位。2-3 防守是 D1、D2 在罰球線外；D3、D4 靠近兩側底角，D5 守籃下中央。',
+            '1 號帶球往左側 45 度攻；5 號上提到左側槽位設掩護，隨即朝籃框順下。左側上線防守者壓球，左低位與中間防守者收縮補位。',
+            '1 號借掩護進入罰球線，可急停投籃；若 D1 離開左上線去協防，就傳給左底角 2 號。動畫會呈現底線防守輪轉。'] },
   { name: '3-2 肘區高低位', en: '3-2 Zone · High-Low',
     spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 55, 55], ['C', 95, 55]],
-    defense: [[26, 76], [75, 83], [124, 76], [57, 30], [93, 30]],
+    defense: [[26, 76], [75, 83], [124, 76], [30, 34], [120, 34]],
     marks: [
-      { t: 'move', p: [[95, 55], [79, 77]], phase: 0 },
-      { t: 'dribble', p: [[75, 112], [75, 94], [78, 78]], phase: 1 },
+      { t: 'move', p: [[95, 55], [79, 77]], actorIndex: 4, phase: 0 },
+      { t: 'dribble', p: [[75, 112], [75, 94], [78, 78]], actorIndex: 0, phase: 1 },
       { t: 'pass', p: [[78, 78], [79, 77]], phase: 2 },
-      { t: 'move', p: [[55, 55], [45, 38]], phase: 2 },
+      { t: 'move', p: [[55, 55], [45, 38]], actorIndex: 3, phase: 2 },
       { t: 'pass', p: [[79, 77], [9, 23]], phase: 3 }],
     defenseMoves: [
-      { defender: 1, phase: 1, p: [[75, 83], [75, 66]] },
-      { defender: 4, phase: 2, p: [[93, 30], [86, 45]] }],
-    steps: ['1 號在弧頂；2、3 號分站底角，4、5 號站兩側肘區，進攻空間分成外圍與罰球線兩側。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 分守兩側低位／籃框旁。',
+      { defender: 0, phase: 1, p: [[26, 76], [45, 72], [65, 67]] },
+      { defender: 1, phase: 1, p: [[75, 83], [75, 72], [75, 64]] },
+      { defender: 2, phase: 1, p: [[124, 76], [105, 72], [88, 67]] },
+      { defender: 3, phase: 1, p: [[30, 34], [50, 42], [68, 48]] },
+      { defender: 4, phase: 1, p: [[120, 34], [99, 41], [82, 48]] },
+      { defender: 1, phase: 2, p: [[75, 64], [78, 76]] },
+      { defender: 3, phase: 2, p: [[68, 48], [64, 39], [62, 34]] },
+      { defender: 4, phase: 2, p: [[82, 48], [75, 33]] },
+      { defender: 0, phase: 3, p: [[65, 67], [49, 62], [40, 56]] },
+      { defender: 3, phase: 3, p: [[62, 34], [37, 29], [12, 24]] }],
+    steps: ['1 號在弧頂；2、3 號分站底角，4、5 號站兩側肘區，進攻空間分成外圍與罰球線兩側。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 靠近兩側底角與低位。',
             '5 號向中路移動，1 號持球壓進罰球線，吸引三名上線防守者後把球交給 5 號。',
-            '弱側 4 號切向左底角。若底線防守收縮，5 號分球給底角；若不收縮則 5 號在罰球線附近出手。'] },
+            '弱側 4 號沉到左側低位牽制底線防守；若防守收縮，5 號分球給左底角 2 號，若未收縮則在高位出手。'] },
   { name: '3-2 底線反切', en: '3-2 Zone · Baseline Cut',
-    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 124, 66], ['PF', 110, 31], ['C', 75, 53]],
-    defense: [[26, 76], [75, 83], [124, 76], [57, 30], [93, 30]],
+    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 118, 68], ['C', 75, 53]],
+    defense: [[26, 76], [75, 83], [124, 76], [30, 34], [120, 34]],
     marks: [
       { t: 'screen', p: [[75, 53], [91, 83]], phase: 0 },
-      { t: 'dribble', p: [[75, 112], [88, 98], [98, 82], [102, 67]], phase: 1 },
-      { t: 'move', p: [[75, 53], [91, 83], [92, 61]], phase: 1 },
-      { t: 'move', p: [[110, 31], [115, 22], [91, 19], [76, 19]], phase: 1 },
+      { t: 'dribble', p: [[75, 112], [88, 98], [98, 82], [102, 67]], actorIndex: 0, phase: 1 },
+      { t: 'move', p: [[75, 53], [91, 83], [88, 62], [82, 42], [76, 25]], actorIndex: 4, phase: 1 },
+      { t: 'move', p: [[118, 68], [123, 50], [115, 32], [95, 24], [76, 20]], actorIndex: 3, phase: 1 },
       { t: 'pass', p: [[102, 67], [76, 19]], phase: 2 },
       { t: 'pass', p: [[76, 19], [9, 23]], phase: 3 }],
     defenseMoves: [
-      { defender: 2, phase: 1, p: [[124, 76], [112, 68]] },
-      { defender: 4, phase: 1, p: [[93, 30], [86, 44]] }],
-    steps: ['1 號弧頂、2 號左底角、3 號右側翼，4 號右低位、5 號高位，形成強弱側與籃下切入空間。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 分守兩側低位／籃框旁。',
+      { defender: 2, phase: 1, p: [[124, 76], [112, 70], [103, 65]] },
+      { defender: 1, phase: 1, p: [[75, 83], [86, 75]] },
+      { defender: 0, phase: 1, p: [[26, 76], [43, 73]] },
+      { defender: 3, phase: 1, p: [[30, 34], [67, 38], [76, 45]] },
+      { defender: 4, phase: 1, p: [[120, 34], [99, 40], [82, 48]] },
+      { defender: 3, phase: 2, p: [[76, 45], [85, 31]] },
+      { defender: 4, phase: 2, p: [[82, 48], [76, 30]] },
+      { defender: 0, phase: 3, p: [[43, 73], [37, 66]] },
+      { defender: 3, phase: 3, p: [[85, 31], [47, 27], [12, 24]] }],
+    steps: ['1 號弧頂、2、3 號分站兩側底角，4 號在右側翼、5 號高位策應，保持兩側底角空間。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 靠近兩側底角與低位。',
             '5 號上提掩護，1 號攻右側縫隙；弱側 4 號沿底線反切到籃框，5 號短順下接應。',
             '1 號先找籃下切入的 4 號，底線協防時傳給 5 號；若弱側防守再收縮，球可轉到底角 2 號。'] }
 ];
@@ -729,13 +705,16 @@ function markSVG(m, i) {
 function tokenSVG(t, i) {
   const F = 'Helvetica Neue,Arial,PingFang TC,Noto Sans TC,sans-serif';
   if (t.ball) return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="12" fill="transparent" pointer-events="all"/>
     <circle r="6.5" fill="${BALL}" stroke="${INK}" stroke-width="0.9"/>
     <path d="M-5.4 0H5.4M0-5.4V5.4M-3.8-3.8Q0 0 3.8 3.8M3.8-3.8Q0 0-3.8 3.8" fill="none" stroke="${INK}" stroke-width="0.55"/></g>`;
   if (t.d) return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="12" fill="transparent" pointer-events="all"/>
     <circle r="6.5" fill="${BALL}" stroke="${INK}" stroke-width="0.9"/>
     <path d="M-2.7 -2.7L2.7 2.7M2.7 -2.7L-2.7 2.7" stroke="#FFFFFF" stroke-width="1.25"/>
     <text y="11" text-anchor="middle" font-size="4.2" font-weight="700" fill="${INK}" font-family="${F}">D${esc(t.no || String(i + 1))}</text></g>`;
   return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="12" fill="transparent" pointer-events="all"/>
     <circle r="6.5" fill="${HI}" stroke="${INK}" stroke-width="0.9"/>
     <text y="2.3" text-anchor="middle" font-size="6.4" font-weight="700" fill="${INK}" font-family="${F}">${esc(t.no || '')}</text>
     <text y="11" text-anchor="middle" font-size="4.1" fill="${INK}" font-family="${F}">${esc(t.name || '')}</text></g>`;
@@ -984,14 +963,14 @@ function planHTML() {
     </div>
     <h2 class="sec">自訂輪休</h2>
     <div class="wrow">
-      <div><label>Q1、Q2 末段／Q3、Q4 開頭休息（分鐘）</label>
+      <div><label>Q1／Q3 末段及 Q2／Q4 開頭休息（分鐘）</label>
         <input type="number" inputmode="numeric" min="0" max="${S.qMin - 1}" value="${S.flex.restMin}" data-flex="restMin"></div>
       <div><label>同時休息的先發人數（最多保留 2 位先發在場）</label>
         <input type="number" inputmode="numeric" min="1" max="5" value="${S.flex.restStarters}" data-flex="restStarters"></div>
     </div>
-  <p class="hint">調好後按「自訂輪替」套用。Q1、Q2 在每節末段輪休；Q3、Q4 在每節開頭輪休。選「人人有份」時，每 2 分鐘按累計分鐘安排輪替，同時盡量保留至少 2 名先發在場。也可直接塗改下方每分鐘格子。</p>
+  <p class="hint">調好後按「自訂輪替」套用。自訂模式會在 Q1、Q3 末段開始輪休，並延續到 Q2、Q4 開頭；「人人有份」每段約 5–6 分鐘，依累計分鐘輪替。也可直接塗改下方每分鐘格子。</p>
     ${S.planScen ? `<p class="hint" style="margin-top:6px">目前套用：<strong>${esc(S.planScen)}</strong>${S.stalePlan ? '' : ' · 已依輪替班次排定'}</p>` : ''}
-  <p class="hint">「均衡輪替」改為全場每段約 5–6 分鐘重新安排陣容，不再把替補集中在半節時段，也避免 4 分鐘就讓球員下場。會依累計分鐘分配：一般 10 人名單以 3 位先發搭配 2 位替補為主，其他名單則按人數調整；盡量維持至少 2 位先發，並兼顧 2 位後衛、2 位前鋒與中鋒位置。FIBA 教練教材建議依比賽情況安排主力休息與替補上場，沒有各國通用的固定分鐘表；FIBA 規則也沒有規定個人上場分鐘。實際換人仍需等死球等規則允許的換人機會。</p>
+  <p class="hint">「均衡輪替」在 40 分鐘賽制先發打 Q1 前 8 分鐘，Q1 末 2 分鐘與 Q2 開頭 2 分鐘由 3 位替補接手；Q2 開賽 2 分鐘後 5 位先發回場，先一起打 2 分鐘，再以 3 先發搭配 2 替補輪替至中場。48 分鐘制按比例約打 10 分鐘後休息。下半場維持 3 先發與 2 替補輪替，Q3/Q4 交界再讓 3 位替補接手 4 分鐘。完整 10 人名單（5 先發、5 替補）的每人平均預估（先發／替補）：40 分鐘制均衡 26／14、拉鋸 28／12、領先 26／14、落後 26／14 分鐘；48 分鐘制均衡 32／16、拉鋸 33／15、領先 31／17、落後 32／16 分鐘。拉鋸戰最後 2 分鐘全主力；落後模式也讓主力收尾。「人人有份」每段約 5–6 分鐘。這是依你的輪替需求設計，FIBA 規則規範換人機會與程序，沒有規定個人上場分鐘；實際換人仍要等規則允許的換人機會。</p>
     <div class="row" style="margin:12px 0">
       <button class="btn" data-act="expRoster">匯出預排／完整備份</button>
       <button class="btn" data-act="impRoster">匯入預排備份</button>
@@ -1144,7 +1123,7 @@ function ensureFreeBoard() {
   ]).concat([{ ball: true, x: 80, y: 111 }]);
   b.marks = []; b.play = '';
 }
-const PLAY_VERSION = 3;
+const PLAY_VERSION = 4;
 function setBuiltinPlay(i) {
   const pl = PLAYS[i]; if (!pl) return;
   const b = S.board, offense = spotsToTokens(pl.spots);
@@ -1188,14 +1167,14 @@ function boardHTML() {
     ${PLAYS.map((p, i) => `<button class="pl" data-play="${i}" aria-selected="${b.play === 'p' + i}">${p.name}<b>${p.en}</b></button>`).join('')}
     ${S.plays.map((p, i) => `<button class="pl" data-myplay="${i}" aria-selected="${b.play === 'm' + i}">${esc(p.name)}<b>自訂</b></button>
       <button class="pl" data-delplay="${i}" aria-label="刪除">✕</button>`).join('')}
-  </div>` : `<p class="hint">拖動橘色籃球到任何位置；球員用「移動」畫靜態跑位箭頭，不會播放動畫。這塊板和戰術庫分開保存。</p>`}
+  </div>` : `<p class="hint">直接拖曳球員或籃球即可移動（圖示周圍也可抓取）；選「跑位箭頭」後，從球員旁邊開始拖曳即可畫出靜態跑位。這塊板和戰術庫分開保存。</p>`}
   <div class="seg">
     <button data-court="0" aria-selected="${!b.full}">半場</button>
     <button data-court="1" aria-selected="${b.full}">全場</button>
   </div>
   ${courtSVG(b.full)}
   <div class="tools">
-    ${TOOLS.map(([k, l]) => `<button data-tool="${k}" aria-selected="${b.tool === k}">${free && k === 'drag' ? '拖球／人' : l}</button>`).join('')}
+    ${TOOLS.map(([k, l]) => `<button data-tool="${k}" aria-selected="${b.tool === k}">${free && k === 'drag' ? '拖球／人' : free && k === 'move' ? '跑位箭頭' : l}</button>`).join('')}
   </div>
   <p class="hint" style="margin:4px 0 8px"><span style="color:#2563EB">● 運球</span>　<span style="color:#EA580C">● 掩護</span>　<span style="color:#15803D">● 進攻移動</span>　<span style="color:#7C3AED">● 傳球</span>　<span style="color:#D92D20">● 防守移動</span></p>
   <div class="row">
@@ -1213,7 +1192,7 @@ function boardHTML() {
     <span class="hint" id="animClock" style="align-self:center">球與人依畫線順序播放</span>
   </div>` : ''}
   ${cur ? `<div class="steps"><h3>${cur.name} — 跑法</h3><ol class="steps">${cur.steps.map(s => `<li>${s}</li>`).join('')}</ol></div>` : ''}
-  <p class="hint">${free ? '自由戰術板：拖動籃球與球員調整位置；選「移動」從球員身上畫出靜態箭頭。' : '「移動」從球員身上開始畫，可播放該球員走位；運球和傳球會帶動球。動畫按畫線順序播放。選「拖人」可以移動球員。'} 掩護＝結尾一根橫桿。畫錯用「擦除」點線，或按「復原一筆」。</p>`;
+  <p class="hint">${free ? '自由戰術板：拖曳球員或籃球圖示可移動；按住圖示旁邊並拖曳可從該球員開始畫跑位箭頭。空白處使用「拖球／人」不會誤畫箭頭。' : '「移動」從球員身上開始畫，可播放該球員走位；運球和傳球會帶動球。動畫按畫線順序播放。選「拖人」可以移動球員。'} 掩護＝結尾一根橫桿。畫錯用「擦除」點線，或按「復原一筆」。</p>`;
 }
 
 function drawMarks(tmp) {
@@ -1227,16 +1206,26 @@ function drawTokens() {
 function initBoard() {
   const svg = document.getElementById('board'); if (!svg) return;
   const b = activeBoard();
+  const free = S.boardMode === 'free';
   const pt = e => {
     const r = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
     return [+(vb.x + (e.clientX - r.left) / r.width * vb.width).toFixed(1),
             +(vb.y + (e.clientY - r.top) / r.height * vb.height).toFixed(1)];
+  };
+  const nearestToken = (x, y, maxDistance) => {
+    let best = null, bestDistance = maxDistance;
+    b.tokens.forEach((t, i) => {
+      const distance = Math.hypot(t.x - x, t.y - y);
+      if (distance <= bestDistance) { best = i; bestDistance = distance; }
+    });
+    return best;
   };
   let drag = null, stroke = null;
 
   svg.addEventListener('pointerdown', e => {
     resetAnimation();
     const [x, y] = pt(e), tk = e.target.closest('[data-tok]');
+    let tokenIndex = tk ? +tk.dataset.tok : null;
     if (b.tool === 'erase') {                        // 點最近的一條線把它擦掉
       let bi = -1, bd = 9e9;
       b.marks.forEach((m, i) => m.p.forEach(q => {
@@ -1245,9 +1234,19 @@ function initBoard() {
       if (bi >= 0 && bd < 10) { b.marks.splice(bi, 1); drawMarks(); save(true); }
       return;
     }
-    if (tk && b.tool === 'drag') { drag = +tk.dataset.tok; svg.setPointerCapture(e.pointerId); return; }
-    const from = tk ? [b.tokens[+tk.dataset.tok].x, b.tokens[+tk.dataset.tok].y] : [x, y];
-    stroke = { t: b.tool === 'drag' ? 'move' : b.tool, p: [from], actorIndex: tk ? +tk.dataset.tok : null };
+    if (tokenIndex === null && (free || b.tool === 'drag')) tokenIndex = nearestToken(x, y, 14);
+
+    // In free mode, touching a token always means drag. Draw from just beside it,
+    // so a missed hit cannot accidentally create a line instead of moving it.
+    if (tokenIndex !== null && (b.tool === 'drag' || (free && tk))) {
+      drag = tokenIndex; svg.setPointerCapture(e.pointerId); return;
+    }
+    // The drag tool is strictly for moving tokens; a drag on empty court is a no-op.
+    if (b.tool === 'drag') return;
+
+    const actorIndex = free && b.tool !== 'pen' ? tokenIndex : (tk ? +tk.dataset.tok : null);
+    const from = actorIndex !== null ? [b.tokens[actorIndex].x, b.tokens[actorIndex].y] : [x, y];
+    stroke = { t: b.tool, p: [from], actorIndex };
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener('pointermove', e => {
