@@ -123,7 +123,7 @@ tr.tot td{background:#E7EAE2;font-weight:700}
 .wrow label{font-size:12px;color:var(--muted);display:block;margin-bottom:3px}
 .wrow input{border:2px solid var(--rule);border-radius:2px;padding:9px;width:100%;min-height:44px}
 .board{width:100%;height:auto;display:block;background:var(--panel);border:2px solid var(--ink);
-  border-radius:3px;touch-action:none;user-select:none}
+  border-radius:3px;touch-action:none;user-select:none;max-width:420px;max-height:58vh;margin:0 auto}
 .tools{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:10px 0}
 .tools button{border:2px solid var(--rule);background:var(--panel);border-radius:2px;padding:7px 2px;
   font-size:13px;font-weight:600;min-height:44px}
@@ -172,7 +172,7 @@ const LS_OLD = 'hoop-rotation-v1';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const ROLES = { S: '先發', R: '輪替' };
 const POS = ['PG', 'SG', 'SF', 'PF', 'C'];
-const ALGO = 6;      // 自動預排演算法版本：舊版排的表要提醒重排
+const ALGO = 10;     // 自動預排演算法版本：舊版排的表要提醒重排
 
 const blankRoster = () => Array.from({ length: 15 }, (_, i) =>
   ({ id: uid(), no: '', name: '', role: i < 5 ? 'S' : 'R', pos: POS[i % 5] }));
@@ -189,7 +189,8 @@ function defaults() {
     lv: { q: 0, acc: 0, startedAt: null, running: false, onCourt: [], written: 0 },
     tab: 'live', gq: 0, showLiveGrid: false, scope: 'all',
     planAlgo: ALGO, planScen: '',
-    board: { full: false, tool: 'drag', tokens: [], marks: [], play: '' }, plays: []
+    board: { full: false, tool: 'drag', tokens: [], marks: [], play: '' },
+    freeBoard: { full: false, tool: 'drag', tokens: [], marks: [], play: '' }, boardMode: 'library', plays: []
   };
 }
 
@@ -200,9 +201,10 @@ let S = defaults();
   try {
     const o = JSON.parse(raw);
     S = Object.assign(defaults(), o);
-    const hasGameData = ['plan', 'live'].some(k => Array.isArray(o[k]) && o[k].some(q => q.some(m => m.length)));
-    if (o.fmt === 32 && o.qMin === 8 && !hasGameData) { S.fmt = 40; S.qMin = 10; }
-    else if (!o.qMin) S.qMin = S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8;
+    const migrated32 = +o.fmt === 32 || +o.qMin === 8;
+    if (migrated32) { S.fmt = 40; S.qMin = 10; }
+    else if (![10, 12].includes(+S.qMin)) S.qMin = S.fmt === 48 ? 12 : 10;
+    S.fmt = S.fmt === 48 ? 48 : 40;
     S.flex = Object.assign(defaults().flex, o.flex || {});
     S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
     S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
@@ -218,13 +220,16 @@ let S = defaults();
     while (S.roster.length < 15) S.roster.push({ id: uid(), no: '', name: '', role: 'R', pos: POS[S.roster.length % 5] });
     S.plan = fitGrid(o.plan, S.qMin); S.live = fitGrid(o.live, S.qMin);
     S.lv.running = false; S.lv.startedAt = null;   // 重新載入一律停錶
-    S.stalePlan = o.planAlgo !== ALGO && S.plan.some(q => q.some(m => m.length));
+    S.stalePlan = (migrated32 || o.planAlgo !== ALGO) && S.plan.some(q => q.some(m => m.length));
     S.board = Object.assign(defaults().board, o.board || {});
+    S.freeBoard = Object.assign(defaults().freeBoard, o.freeBoard || {});
+    S.boardMode = o.boardMode === 'free' ? 'free' : 'library';
     S.plays = Array.isArray(o.plays) ? o.plays : [];
   } catch (e) { S = defaults(); }
 })();
 
 let saveTimer = null;
+const activeBoard = () => S.boardMode === 'free' ? S.freeBoard : S.board;
 function save(now) {
   clearTimeout(saveTimer);
   const doIt = () => { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} };
@@ -249,14 +254,12 @@ function suggestions() {
   return out;
 }
 
-/* ═════════ 三種戰況情境 ═════════
-   每節切成若干「輪換區」：[起, 迄, 同時休息的先發人數]，比例存，40/48 制通用。
-   k=0 代表這段全先發在場（開節、收尾）。教練一次只換 1～2 人，先發錯開休息，
-   所以場上永遠是先發與替補混編，不會整批五上五下。                     */
+/* ═════════ 輪替情境 ═════════
+   每節切成若干「輪換區」：[起, 迄, 這段安排休息的先發人數]，比例存，40/48 制通用。
+   k=0 代表先發全留場；人人有份模式則忽略位置與先發身分，按累計分鐘輪替。 */
 const SCEN = {
-  balanced: { name: '均衡輪替', desc: '每節約 20% 輪休、前後交錯', z: [
-    [[0, .8, 0], [.8, 1, 5]], [[0, .8, 0], [.8, 1, 5]],
-    [[0, .2, 5], [.2, 1, 0]], [[0, .2, 5], [.2, 1, 0]] ] },
+  equal: { name: '人人有份', desc: '至少留 2 名先發，其餘盡量平均', z: null },
+  balanced: { name: '均衡輪替', desc: '每段約 5–6 分鐘，先發替補交錯', z: null },
   custom: { name: '自訂輪替', desc: '依下方設定輪休時間與人數', z: null },
   tight: { name: '拉鋸戰', desc: '第四節主力收尾', z: [
     [[0, .6, 0], [.6, 1, 2]], [[0, 1, 3]], [[0, .6, 0], [.6, 1, 2]], [[0, .3, 2], [.3, 1, 0]] ] },
@@ -284,6 +287,107 @@ function autoPlan(key, onlyQ4) {
   const qs = onlyQ4 ? [3] : [0, 1, 2, 3];
   qs.forEach(q => { S.plan[q] = Array.from({ length: S.qMin }, () => []); });
 
+  if (key === 'balanced') {
+    const mins = {}; ps.forEach(p => mins[p.id] = minutesOf('plan', p.id).total);
+    const starters = ps.filter(p => p.role === 'S');
+    const reserves = ps.filter(p => p.role !== 'S');
+    const minStarters = Math.min(2, starters.length);
+    const desiredBench = reserves.length <= 3 ? 1 : reserves.length <= 6 ? 2 : 3;
+    const benchCount = reserves.length
+      ? Math.max(5 - starters.length, Math.min(desiredBench, reserves.length, 5 - minStarters))
+      : 0;
+    const starterCount = Math.min(starters.length, 5 - benchCount);
+    const reserveCount = 5 - starterCount;
+    const combinations = (arr, count) => {
+      if (count < 0 || count > arr.length) return [];
+      if (count === 0) return [[]];
+      const out = [];
+      const walk = (from, picked) => {
+        if (picked.length === count) { out.push(picked); return; }
+        for (let i = from; i <= arr.length - (count - picked.length); i++)
+          walk(i + 1, picked.concat(arr[i]));
+      };
+      walk(0, []);
+      return out;
+    };
+    const starterGroups = combinations(starters, starterCount);
+    const reserveGroups = combinations(reserves, reserveCount);
+    const priorLineup = onlyQ4 ? new Set(S.plan[2][S.qMin - 1] || []) : new Set();
+    const positionDeficit = lineup => {
+      const guards = lineup.filter(p => p.pos === 'PG' || p.pos === 'SG').length;
+      const forwards = lineup.filter(p => p.pos === 'SF' || p.pos === 'PF').length;
+      const centers = lineup.filter(p => p.pos === 'C').length;
+      return Math.max(0, 2 - guards) + Math.max(0, 2 - forwards) + Math.max(0, 1 - centers);
+    };
+    const startAbs = onlyQ4 ? 3 * S.qMin : 0;
+    const endAbs = 4 * S.qMin;
+    let prev = priorLineup;
+    const totalMinutes = endAbs - startAbs;
+    const shiftCount = Math.ceil(totalMinutes / 6);
+    const baseShift = Math.floor(totalMinutes / shiftCount);
+    const longerShifts = totalMinutes % shiftCount;
+    let start = startAbs;
+    for (let shift = 0; shift < shiftCount; shift++) {
+      const shiftLength = baseShift + (shift < longerShifts ? 1 : 0);
+      const shiftStart = start, shiftEnd = start + shiftLength;
+      start = shiftEnd;
+      let best = null, bestScore = Infinity;
+      starterGroups.forEach(sg => reserveGroups.forEach(rg => {
+        const lineup = sg.concat(rg);
+        if (lineup.length !== 5) return;
+        const minutesCost = lineup.reduce((sum, p) => sum + mins[p.id], 0);
+        const positionCost = positionDeficit(lineup) * 100;
+        const continuityCost = lineup.reduce((sum, p) => sum + (prev.has(p.id) ? 0 : 2.5), 0);
+        const score = minutesCost + positionCost + continuityCost;
+        if (score < bestScore) { best = lineup; bestScore = score; }
+      }));
+      if (!best) continue;
+      for (let abs = shiftStart; abs < shiftEnd; abs++) {
+        const q = Math.floor(abs / S.qMin), m = abs % S.qMin;
+        S.plan[q][m] = best.map(p => p.id);
+      }
+      best.forEach(p => mins[p.id] += shiftEnd - shiftStart);
+      prev = new Set(best.map(p => p.id));
+    }
+    S.planAlgo = ALGO; S.stalePlan = false;
+    S.planScen = SCEN[key].name + (onlyQ4 ? '（只換第 4 節）' : '（全場）');
+    return true;
+  }
+
+  if (key === 'equal') {
+    const mins = {}; ps.forEach(p => mins[p.id] = minutesOf('plan', p.id).total);
+    let prev = onlyQ4 ? new Set(S.plan[2][S.qMin - 1] || []) : new Set();
+    let rotation = 0;
+    const starters = ps.filter(p => p.role === 'S');
+    qs.forEach(q => {
+      for (let m = 0; m < S.qMin; m += 2) {
+        const len = Math.min(2, S.qMin - m);
+        const ranked = ps.slice().sort((a, b) => {
+          if (mins[a.id] !== mins[b.id]) return mins[a.id] - mins[b.id];
+          if (prev.has(a.id) !== prev.has(b.id)) return prev.has(a.id) ? -1 : 1;
+          const ia = (ps.indexOf(a) - rotation % ps.length + ps.length) % ps.length;
+          const ib = (ps.indexOf(b) - rotation % ps.length + ps.length) % ps.length;
+          return ia - ib;
+        });
+        const chosen = ranked.slice(0, 5);
+        const minStarters = Math.min(2, starters.length);
+        while (chosen.filter(p => p.role === 'S').length < minStarters) {
+          const nextStarter = ranked.find(p => p.role === 'S' && !chosen.includes(p));
+          const replace = chosen.slice().reverse().find(p => p.role !== 'S');
+          if (!nextStarter || !replace) break;
+          chosen.splice(chosen.indexOf(replace), 1, nextStarter);
+        }
+        const lineup = chosen.map(p => p.id);
+        for (let k = m; k < m + len; k++) S.plan[q][k] = lineup.slice();
+        lineup.forEach(id => mins[id] += len);
+        prev = new Set(lineup); rotation++;
+      }
+    });
+    S.planAlgo = ALGO; S.stalePlan = false;
+    S.planScen = SCEN[key].name + (onlyQ4 ? '（只換第 4 節）' : '（全場）');
+    return true;
+  }
+
   // PG/SG 共用後衛輪替池，兩個先發後衛可互相補位。
   const main = {}, subs = {};
   const guards = ps.filter(p => p.pos === 'PG' || p.pos === 'SG');
@@ -303,9 +407,12 @@ function autoPlan(key, onlyQ4) {
   const benchAll = ps.filter(p => !mainIds.has(p.id));
 
   /* ── 步驟 1：列出所有「輪換區」的分鐘，記下該分鐘容許幾個先發休息 ── */
+  const mainStarters = POS.map(P => main[P]).filter(p => p && p.role === 'S').length;
+  const maxStartersToRest = Math.min(benchAll.length, Math.max(0, mainStarters - Math.min(2, mainStarters)));
   const tl = [];                                   // {q, m, k, abs}
   qs.forEach(q => zonesOf(q, key).forEach(z => {
-    for (let m = z.from; m < z.to; m++) tl.push({ q, m, k: z.k, abs: q * S.qMin + m });
+    const k = Math.min(z.k, maxStartersToRest);
+    for (let m = z.from; m < z.to; m++) tl.push({ q, m, k, abs: q * S.qMin + m });
   }));
   const rest = tl.map(() => new Set());
 
@@ -439,35 +546,52 @@ function courtSVG(full) {
     <g>${halfCourt()}</g>
     ${full ? `<g transform="translate(150,280) rotate(180)">${halfCourt()}</g>` : ''}
     ${mid}
-    <g id="marks"></g><g id="tokens"></g></svg>`;
+    <g id="marks"></g><g id="tokens"></g><g id="animationLayer"></g></svg>`;
 }
 
 /* ── 預設戰術：spot 用位置代號，載入時對到你名單上的球員 ── */
 const PLAYS = [
   { name: '擋拆', en: 'Pick & Roll',
-    spots: [['PG', 75, 88], ['C', 88, 80], ['PF', 25, 62], ['SF', 6, 22], ['SG', 144, 22]],
+    spots: [['PG', 75, 112], ['C', 88, 77], ['PF', 128, 82], ['SF', 9, 23], ['SG', 141, 23]],
+    defense: [[66, 108], [20, 29], [120, 72], [132, 36], [99, 82]],
     marks: [
-      { t: 'screen', p: [[88, 80], [82, 85]] },
-      { t: 'dribble', p: [[75, 88], [92, 78], [102, 64], [105, 52]] },
-      { t: 'move', p: [[88, 80], [84, 55], [78, 32]] },
-      { t: 'pass', p: [[105, 52], [138, 26]] }],
-    steps: ['5 號上到弧頂側邊，為 1 號設掩護',
-            '1 號往掩護那一側運球擠過去，肩膀貼著掩護者走',
-            '5 號掩護完立刻順下切籃（roll）；若對手縮防就外拉（pop）',
-            '防守補防收縮時，把球分到底角的 2 號'] },
+      { t: 'screen', p: [[75, 96], [84, 89]], phase: 0 },
+      { t: 'move', p: [[88, 77], [84, 89]], actorIndex: 1, phase: 0 },
+      { t: 'dribble', p: [[75, 112], [73, 101], [80, 92], [96, 88], [101, 71]], actorIndex: 0, phase: 1 },
+      { t: 'move', p: [[84, 89], [82, 66], [78, 42], [76, 25]], actorIndex: 1, phase: 1 },
+      { t: 'pass', p: [[101, 71], [76, 25]], phase: 2 },
+      { t: 'pass', p: [[76, 25], [141, 23]], phase: 3 }],
+    defenseMoves: [
+      { defender: 0, phase: 1, p: [[66, 108], [78, 100], [91, 88]] },
+      { defender: 4, phase: 1, p: [[99, 82], [91, 89]] },
+      { defender: 3, phase: 1, p: [[132, 36], [118, 45]] },
+      { defender: 4, phase: 2, p: [[91, 89], [81, 66], [78, 43]] },
+      { defender: 3, phase: 3, p: [[118, 45], [137, 25]] }],
+    steps: ['1 號弧頂持球，5 號上提到右側高位設球掩護；2、3 號分站兩側底角，4 號拉開弱側。紅色 D 是對位防守。',
+            '1 號貼著 5 號掩護往右突破，5 號轉身順下切向籃框；持球防守追過掩護，5 號防守者上提後回追。',
+            '1 號先讀籃下：可傳給順下的 5 號；底線防守收縮時，5 號再把球分給右底角 2 號。動畫會同步播放兩名防守者的追防與補位。'] },
   { name: '西班牙擋拆', en: 'Spanish P&R',
-    spots: [['PG', 75, 88], ['C', 88, 80], ['SG', 75, 50], ['SF', 6, 22], ['PF', 144, 22]],
+    spots: [['PG', 75, 112], ['C', 88, 78], ['SG', 38, 84], ['SF', 9, 23], ['PF', 141, 23]],
+    defense: [[66, 108], [28, 80], [130, 77], [130, 29], [99, 82]],
     marks: [
-      { t: 'screen', p: [[88, 80], [82, 85]] },
-      { t: 'dribble', p: [[75, 88], [92, 77], [100, 62]] },
-      { t: 'move', p: [[88, 80], [82, 52], [77, 30]] },
-      { t: 'screen', p: [[75, 50], [83, 61]] },
-      { t: 'move', p: [[75, 50], [68, 70], [68, 86]] }],
-    steps: ['基本形跟一般擋拆一樣，5 號替 1 號設高位掩護',
-            '1 號運球過掩護，5 號順下',
-            '關鍵在 2 號：他從罰球線一帶回頭，替「5 號的防守者」設背掩護',
-            '5 號的防守者被卡住 → 5 號直落籃下無人守',
-            '2 號設完掩護順勢外拉三分，防守只能二選一'] },
+      { t: 'screen', p: [[75, 96], [84, 89]], phase: 0 },
+      { t: 'move', p: [[88, 78], [84, 89]], actorIndex: 1, phase: 0 },
+      { t: 'dribble', p: [[75, 112], [73, 100], [82, 92], [97, 87], [101, 72]], actorIndex: 0, phase: 1 },
+      { t: 'move', p: [[84, 89], [81, 67], [77, 42], [76, 24]], actorIndex: 1, phase: 1 },
+      { t: 'move', p: [[38, 84], [62, 80], [84, 70]], actorIndex: 2, phase: 1 },
+      { t: 'screen', p: [[91, 70], [83, 70]], phase: 1 },
+      { t: 'pass', p: [[101, 72], [76, 24]], phase: 2 },
+      { t: 'move', p: [[84, 70], [51, 84]], actorIndex: 2, phase: 2 },
+      { t: 'pass', p: [[76, 24], [51, 84]], phase: 3 }],
+    defenseMoves: [
+      { defender: 0, phase: 1, p: [[66, 108], [79, 100], [91, 87]] },
+      { defender: 4, phase: 1, p: [[99, 82], [91, 86], [87, 70]] },
+      { defender: 1, phase: 1, p: [[28, 80], [57, 80], [78, 71]] },
+      { defender: 4, phase: 2, p: [[87, 70], [80, 48]] },
+      { defender: 1, phase: 2, p: [[78, 71], [56, 83]] }],
+    steps: ['1、5 先做中路高位擋拆：5 號設掩護，1 號借掩護往右攻，5 號順下。2 號從左側槽位出發。',
+            '5 號順下時，2 號移到 5 號防守者的背後做背掩護（screen the screener），不是替 1 號再做一次球掩護。',
+            '2 號設完背掩護立即外彈到左側三分線；1 號可傳給順下的 5 號，若防守收縮，5 號再分球給外彈的 2 號。動畫同步呈現 1、5、2 與防守者的走位。'] },
   { name: '牛角', en: 'Horns',
     spots: [['PG', 75, 88], ['PF', 53, 56], ['C', 97, 56], ['SG', 6, 22], ['SF', 144, 22]],
     marks: [
@@ -504,53 +628,67 @@ const PLAYS = [
             '2 號看防守者怎麼追，自己選邊出來',
             '走雙掩護那側較難追防，走單掩護那側則跑得快',
             '1 號在弧頂持球等時機，沒有空檔就交給頂出來的長人打二次進攻'] },
-  { name: '2-3 中路高位擋拆', en: '2-3 Zone · High P&R',
-    spots: [['PG', 75, 108], ['SG', 18, 82], ['SF', 132, 82], ['PF', 14, 119], ['C', 88, 62]],
+  { name: '2-3 中路策應底線切入', en: '2-3 Zone · High Post Cut',
+    spots: [['PG', 75, 112], ['SG', 29, 67], ['SF', 9, 23], ['PF', 112, 31], ['C', 75, 30]],
+    defense: [[56, 56], [94, 56], [56, 31], [94, 31], [75, 22]],
     marks: [
-      { t: 'screen', p: [[88, 62], [82, 68]] },
-      { t: 'dribble', p: [[75, 108], [84, 96], [91, 82], [84, 70]] },
-      { t: 'move', p: [[88, 62], [85, 76], [78, 84], [75, 68]] },
-      { t: 'pass', p: [[84, 70], [76, 82]] },
-      { t: 'move', p: [[18, 82], [27, 72]] }],
-    steps: ['1 號在弧頂持球，2、3 號拉開兩側，4 號站底角；5 號從肘區上提替 1 號設高位掩護。',
-            '1 號借掩護切入罰球線中央，先讀兩名底線防守者是否收縮。',
-            '5 號短順下到罰球線附近接球，形成中路 4 打 3；若中鋒補上，分球給底角或弱邊射手。'] },
-  { name: '2-3 短順下接應', en: '2-3 Zone · Short Roll',
-    spots: [['PG', 75, 108], ['SG', 18, 81], ['SF', 132, 81], ['PF', 14, 119], ['C', 55, 54]],
+      { t: 'move', p: [[75, 30], [75, 52]], phase: 0 },
+      { t: 'pass', p: [[75, 112], [75, 52]], phase: 0 },
+      { t: 'move', p: [[75, 112], [75, 79], [75, 41], [91, 24], [141, 23]], phase: 1 },
+      { t: 'move', p: [[112, 31], [124, 40], [128, 62]], phase: 1 },
+      { t: 'pass', p: [[75, 52], [141, 23]], phase: 2 },
+      { t: 'pass', p: [[141, 23], [9, 23]], phase: 3 }],
+    defenseMoves: [
+      { defender: 4, phase: 1, p: [[75, 22], [75, 43]] },
+      { defender: 2, phase: 1, p: [[56, 31], [61, 43]] }],
+    steps: ['1 號弧頂持球，5 號從低位上提到中路要球；2 號留左翼、3 號守左底角，4 號在右側低位。防守按 2-3 排列：D1、D2 在上線肘區，D3、D4 兩側低位，D5 籃下中間。',
+            '1 號把球傳給中路的 5 號後，直接切向籃框找上籃。沒接到球就繞到對側底角，並由 4 號拉到側翼，把底線空出來。',
+            '5 號先回傳給繞到底角的 1 號；若防守再往球側收縮，1 號轉移給底角 3 號出手。動畫顯示底線防守補位。'] },
+  { name: '2-3 左側45度擋拆', en: '2-3 Zone · Left Slot P&R',
+    spots: [['PG', 75, 112], ['SG', 24, 65], ['SF', 141, 23], ['PF', 123, 65], ['C', 75, 52]],
+    defense: [[56, 56], [94, 56], [56, 31], [94, 31], [75, 22]],
     marks: [
-      { t: 'screen', p: [[55, 54], [61, 60]] },
-      { t: 'dribble', p: [[75, 108], [62, 97], [48, 84]] },
-      { t: 'move', p: [[55, 54], [64, 70], [74, 78]] },
-      { t: 'pass', p: [[48, 84], [73, 75]] },
-      { t: 'move', p: [[14, 119], [27, 103], [43, 91]] },
-      { t: 'move', p: [[18, 81], [35, 74]] }],
-    steps: ['1 號弧頂發動，5 號上提替他設側邊掩護；兩側射手維持寬度。',
-            '1 號往一側突破吸引上線與底線防守，5 號不必一路衝籃，短順下停在高位接球。',
-            '弱側 4 號沿底線切到短角落，2 號上提接應。5 號接球後可自己投、分底角，或再傳給籃下空切者。'] },
+      { t: 'screen', p: [[75, 52], [55, 81]], phase: 0 },
+      { t: 'dribble', p: [[75, 112], [64, 97], [51, 82], [45, 69]], phase: 1 },
+      { t: 'move', p: [[75, 52], [55, 81], [59, 66]], phase: 1 },
+      { t: 'pass', p: [[45, 69], [24, 65]], phase: 2 }],
+    defenseMoves: [
+      { defender: 0, phase: 1, p: [[56, 56], [49, 72]] },
+      { defender: 4, phase: 1, p: [[75, 22], [64, 42]] }],
+    steps: ['1 號帶球往左側 45 度攻；5 號由高位移出來卡位，2 號在左翼保持傳球空間，3、4 號分居右側。防守按 2-3 排列：D1、D2 在上線肘區，D3、D4 兩側低位，D5 籃下中間。',
+            '1 號利用 5 號掩護進入罰球線附近，可急停拋投或跳投；防守中鋒上提，5 號順下接應。',
+            '若原本照顧 2 號的左側上線防守（D1）離開位置協防 1 號，就把球傳給左翼 2 號出手。動畫同步顯示防守補位。'] },
   { name: '3-2 肘區高低位', en: '3-2 Zone · High-Low',
-    spots: [['PG', 75, 108], ['SG', 22, 78], ['SF', 128, 78], ['PF', 14, 119], ['C', 75, 57]],
+    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 55, 55], ['C', 95, 55]],
+    defense: [[26, 76], [75, 83], [124, 76], [57, 30], [93, 30]],
     marks: [
-      { t: 'screen', p: [[75, 57], [79, 63]] },
-      { t: 'dribble', p: [[75, 108], [65, 96], [55, 83], [66, 72]] },
-      { t: 'move', p: [[75, 57], [72, 72], [66, 83]] },
-      { t: 'pass', p: [[66, 72], [66, 84]] },
-      { t: 'move', p: [[14, 119], [34, 112], [50, 98]] },
-      { t: 'pass', p: [[66, 84], [25, 111]] }],
-    steps: ['1 號弧頂持球，5 號由罰球線上提替 1 號設掩護；4 號守住底線短角落。',
-            '1 號切進三名上線防守者之間，把球送到肘區／罰球線的 5 號手中。',
-            '底線防守上提時，4 號切到籃下或短角落接高低位傳球；若底線收縮，5 號分給兩側射手。'] },
+      { t: 'move', p: [[95, 55], [79, 77]], phase: 0 },
+      { t: 'dribble', p: [[75, 112], [75, 94], [78, 78]], phase: 1 },
+      { t: 'pass', p: [[78, 78], [79, 77]], phase: 2 },
+      { t: 'move', p: [[55, 55], [45, 38]], phase: 2 },
+      { t: 'pass', p: [[79, 77], [9, 23]], phase: 3 }],
+    defenseMoves: [
+      { defender: 1, phase: 1, p: [[75, 83], [75, 66]] },
+      { defender: 4, phase: 2, p: [[93, 30], [86, 45]] }],
+    steps: ['1 號在弧頂；2、3 號分站底角，4、5 號站兩側肘區，進攻空間分成外圍與罰球線兩側。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 分守兩側低位／籃框旁。',
+            '5 號向中路移動，1 號持球壓進罰球線，吸引三名上線防守者後把球交給 5 號。',
+            '弱側 4 號切向左底角。若底線防守收縮，5 號分球給底角；若不收縮則 5 號在罰球線附近出手。'] },
   { name: '3-2 底線反切', en: '3-2 Zone · Baseline Cut',
-    spots: [['PG', 75, 108], ['SG', 20, 78], ['SF', 130, 78], ['PF', 15, 118], ['C', 88, 59]],
+    spots: [['PG', 75, 112], ['SG', 9, 23], ['SF', 124, 66], ['PF', 110, 31], ['C', 75, 53]],
+    defense: [[26, 76], [75, 83], [124, 76], [57, 30], [93, 30]],
     marks: [
-      { t: 'screen', p: [[88, 59], [82, 65]] },
-      { t: 'dribble', p: [[75, 108], [86, 97], [98, 86]] },
-      { t: 'move', p: [[88, 59], [83, 74], [74, 82]] },
-      { t: 'move', p: [[15, 118], [30, 108], [45, 114], [58, 124]] },
-      { t: 'pass', p: [[98, 86], [58, 119]] },
-      { t: 'pass', p: [[58, 119], [130, 78]] }],
-    steps: ['1 號從弧頂發動，5 號上提設掩護；2、3 號拉到兩側，4 號從底線準備反切。',
-            '1 號借掩護往弱側肘區運球，吸引三名上線防守者移動；5 號短順下卡住中路防守。',
-            '4 號趁底線防守看球時，從底角沿底線反切到籃下。1 號先找 4 號，若底線收縮再轉傳弱側射手。'] }
+      { t: 'screen', p: [[75, 53], [91, 83]], phase: 0 },
+      { t: 'dribble', p: [[75, 112], [88, 98], [98, 82], [102, 67]], phase: 1 },
+      { t: 'move', p: [[75, 53], [91, 83], [92, 61]], phase: 1 },
+      { t: 'move', p: [[110, 31], [115, 22], [91, 19], [76, 19]], phase: 1 },
+      { t: 'pass', p: [[102, 67], [76, 19]], phase: 2 },
+      { t: 'pass', p: [[76, 19], [9, 23]], phase: 3 }],
+    defenseMoves: [
+      { defender: 2, phase: 1, p: [[124, 76], [112, 68]] },
+      { defender: 4, phase: 1, p: [[93, 30], [86, 44]] }],
+    steps: ['1 號弧頂、2 號左底角、3 號右側翼，4 號右低位、5 號高位，形成強弱側與籃下切入空間。防守按 3-2 排列：D1–D3 三人在上線，D4、D5 分守兩側低位／籃框旁。',
+            '5 號上提掩護，1 號攻右側縫隙；弱側 4 號沿底線反切到籃框，5 號短順下接應。',
+            '1 號先找籃下切入的 4 號，底線協防時傳給 5 號；若弱側防守再收縮，球可轉到底角 2 號。'] }
 ];
 
 /* ── 幾何小工具 ── */
@@ -575,28 +713,158 @@ function wavy(p) {                                   // 運球：波浪線
   }
   return d;
 }
-function head(p, kind) {                             // 箭頭 / 掩護的橫桿
+function head(p, kind, col = INK) {                  // 箭頭 / 掩護的橫桿
   const [x, y, ux, uy] = along(p, tot(p));
-  if (kind === 'screen') return `<path d="M${(x - uy * 4).toFixed(1)} ${(y + ux * 4).toFixed(1)}L${(x + uy * 4).toFixed(1)} ${(y - ux * 4).toFixed(1)}" stroke="${INK}" stroke-width="1.2" fill="none"/>`;
+  if (kind === 'screen') return `<path d="M${(x - uy * 4).toFixed(1)} ${(y + ux * 4).toFixed(1)}L${(x + uy * 4).toFixed(1)} ${(y - ux * 4).toFixed(1)}" stroke="${col}" stroke-width="1.5" fill="none"/>`;
   const a = [x - ux * 5 - uy * 2.6, y - uy * 5 + ux * 2.6], b = [x - ux * 5 + uy * 2.6, y - uy * 5 - ux * 2.6];
-  return `<polygon points="${x.toFixed(1)},${y.toFixed(1)} ${a[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)}" fill="${INK}"/>`;
+  return `<polygon points="${x.toFixed(1)},${y.toFixed(1)} ${a[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)}" fill="${col}"/>`;
 }
 function markSVG(m, i) {
   const dash = m.t === 'pass' ? ' stroke-dasharray="4 3"' : '';
   const d = m.t === 'dribble' ? wavy(m.p) : line(m.p);
-  const col = m.t === 'pen' ? BALL : INK;
-  return `<g data-mark="${i}"><path d="${d}" fill="none" stroke="${col}" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"${dash}/>`
-    + (m.t === 'pen' ? '' : head(m.p, m.t)) + `</g>`;
+  const col = m.defense ? '#D92D20' : ({ dribble: '#2563EB', screen: '#EA580C', move: '#15803D', pass: '#7C3AED', pen: BALL }[m.t] || INK);
+  return `<g data-mark="${i}"><path d="${d}" fill="none" stroke="${col}" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"${dash}/>`
+    + (m.t === 'pen' ? '' : head(m.p, m.t, col)) + `</g>`;
 }
 function tokenSVG(t, i) {
   const F = 'Helvetica Neue,Arial,PingFang TC,Noto Sans TC,sans-serif';
-  if (t.d) return `<g data-tok="${i}" transform="translate(${t.x},${t.y})">
-    <circle r="7.5" fill="transparent"/>
-    <path d="M-4.5 -4.5L4.5 4.5M4.5 -4.5L-4.5 4.5" stroke="${INK}" stroke-width="1.4"/></g>`;
-  return `<g data-tok="${i}" transform="translate(${t.x},${t.y})">
-    <circle r="7" fill="${HI}" stroke="${INK}" stroke-width="0.9"/>
-    <text y="2.6" text-anchor="middle" font-size="7.5" font-weight="700" fill="${INK}" font-family="${F}">${esc(t.no || '')}</text>
-    <text y="13.4" text-anchor="middle" font-size="5" fill="${INK}" font-family="${F}">${esc(t.name || '')}</text></g>`;
+  if (t.ball) return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="6.5" fill="${BALL}" stroke="${INK}" stroke-width="0.9"/>
+    <path d="M-5.4 0H5.4M0-5.4V5.4M-3.8-3.8Q0 0 3.8 3.8M3.8-3.8Q0 0-3.8 3.8" fill="none" stroke="${INK}" stroke-width="0.55"/></g>`;
+  if (t.d) return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="6.5" fill="${BALL}" stroke="${INK}" stroke-width="0.9"/>
+    <path d="M-2.7 -2.7L2.7 2.7M2.7 -2.7L-2.7 2.7" stroke="#FFFFFF" stroke-width="1.25"/>
+    <text y="11" text-anchor="middle" font-size="4.2" font-weight="700" fill="${INK}" font-family="${F}">D${esc(t.no || String(i + 1))}</text></g>`;
+  return `<g data-tok="${i}" transform="translate(${t.x},${t.y}) scale(.82)">
+    <circle r="6.5" fill="${HI}" stroke="${INK}" stroke-width="0.9"/>
+    <text y="2.3" text-anchor="middle" font-size="6.4" font-weight="700" fill="${INK}" font-family="${F}">${esc(t.no || '')}</text>
+    <text y="11" text-anchor="middle" font-size="4.1" fill="${INK}" font-family="${F}">${esc(t.name || '')}</text></g>`;
+}
+
+let animState = { running: false, startAt: 0, elapsed: 0, duration: 0, raf: 0, events: [], base: [], ballStart: [75, 105] };
+function animationPlan() {
+  const b = activeBoard();
+  const base = b.tokens.map(t => Object.assign({}, t));
+  const positions = base.map(t => [t.x, t.y]);
+  const events = [];
+  let ball = null, ballStart = null, cursor = 0;
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const durationOf = pts => Math.max(.65, Math.min(1.8, tot(pts) / 48));
+  const phases = new Map();
+  b.marks.forEach((mark, i) => {
+    const key = mark.phase === undefined ? `single-${i}` : `phase-${mark.phase}`;
+    if (!phases.has(key)) phases.set(key, []);
+    phases.get(key).push(mark);
+  });
+  phases.forEach(marks => {
+    let phaseDuration = 0;
+    marks.forEach(mark => {
+      if (!Array.isArray(mark.p) || mark.p.length < 2) return;
+      if (mark.t === 'move') {
+      let actor = Number.isInteger(mark.actorIndex) && base[mark.actorIndex] ? mark.actorIndex : -1;
+      if (actor < 0) {
+        let nearest = Infinity;
+        positions.forEach((p, i) => { const d = dist(p, mark.p[0]); if (d < nearest) { nearest = d; actor = i; } });
+      }
+      if (actor < 0 || !base[actor]) return;
+      const pts = mark.p.map(p => p.slice());
+      if (dist(positions[actor], pts[0]) > 3) pts.unshift(positions[actor].slice());
+      const duration = durationOf(pts);
+      events.push({ kind: 'player', actor, pts, start: cursor, duration });
+      phaseDuration = Math.max(phaseDuration, duration); positions[actor] = pts[pts.length - 1].slice();
+      } else if (mark.t === 'dribble' || mark.t === 'pass') {
+      const pts = mark.p.map(p => p.slice());
+      if (ball && dist(ball, pts[0]) > 3) pts.unshift(ball.slice());
+      if (!ball) { ball = pts[0].slice(); ballStart = ball.slice(); }
+      const duration = durationOf(pts);
+        let actor = Number.isInteger(mark.actorIndex) && base[mark.actorIndex] && !base[mark.actorIndex].d ? mark.actorIndex : -1;
+        if (mark.t === 'dribble' && actor < 0) {
+          let nearest = Infinity;
+          positions.forEach((p, i) => {
+            if (base[i].d) return;
+            const d = dist(p, pts[0]); if (d < nearest) { nearest = d; actor = i; }
+          });
+        }
+        const kind = mark.t === 'dribble' && actor >= 0 ? 'dribble' : 'ball';
+        events.push({ kind, actor, pts, start: cursor, duration });
+        phaseDuration = Math.max(phaseDuration, duration); ball = pts[pts.length - 1].slice();
+        if (kind === 'dribble') positions[actor] = pts[pts.length - 1].slice();
+      }
+    });
+    cursor += phaseDuration;
+  });
+  return { base, events, duration: cursor, ballStart: ballStart || [75, 105] };
+}
+function pointOnPath(pts, t) {
+  const length = tot(pts); if (!length) return pts[pts.length - 1].slice();
+  let remain = length * Math.max(0, Math.min(1, t));
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!d) continue;
+    if (remain <= d) return [a[0] + (b[0] - a[0]) * remain / d, a[1] + (b[1] - a[1]) * remain / d];
+    remain -= d;
+  }
+  return pts[pts.length - 1].slice();
+}
+function drawAnimationAt(seconds) {
+  const layer = document.getElementById('animationLayer'); if (!layer) return;
+  const positions = animState.base.map(t => [t.x, t.y]);
+  let ball = animState.ballStart.slice();
+  for (const ev of animState.events) {
+    if (seconds >= ev.start + ev.duration) {
+      if (ev.kind === 'player' || ev.kind === 'dribble') positions[ev.actor] = ev.pts[ev.pts.length - 1].slice();
+      else ball = ev.pts[ev.pts.length - 1].slice();
+      if (ev.kind === 'dribble') ball = [ev.pts[ev.pts.length - 1][0] + 4, ev.pts[ev.pts.length - 1][1] + 4];
+    } else if (seconds >= ev.start) {
+      const p = pointOnPath(ev.pts, (seconds - ev.start) / ev.duration);
+      if (ev.kind === 'player' || ev.kind === 'dribble') positions[ev.actor] = p;
+      if (ev.kind === 'dribble') ball = [p[0] + 4, p[1] + 4];
+      else if (ev.kind === 'ball') ball = p;
+    }
+  }
+  const tokens = animState.base.map((t, i) => tokenSVG(Object.assign({}, t, { x: positions[i][0], y: positions[i][1] }), i)).join('');
+  layer.innerHTML = `<g id="animPlayers" pointer-events="none">${tokens}</g>
+    <g id="animBall" transform="translate(${ball[0]},${ball[1]})" pointer-events="none">
+      <circle r="4.3" fill="${BALL}" stroke="${INK}" stroke-width=".8"/>
+      <path d="M-3.2 -1.8Q0 0 3.2 1.8M-1.8 -3.2Q0 0 1.8 3.2" fill="none" stroke="${INK}" stroke-width=".45"/>
+    </g>`;
+  const clock = document.getElementById('animClock');
+  if (clock) clock.textContent = `${Math.min(seconds, animState.duration).toFixed(1)}s / ${animState.duration.toFixed(1)}s`;
+}
+function updateAnimButton() {
+  const b = document.getElementById('animToggle'); if (!b) return;
+  b.textContent = animState.running ? 'Ⅱ 暫停' : animState.elapsed >= animState.duration && animState.duration ? '↻ 重播' : animState.elapsed ? '▶ 繼續' : '▶ 播放走位';
+}
+function animationFrame(now) {
+  if (!animState.running) return;
+  const elapsed = animState.elapsed + (now - animState.startAt) / 1000;
+  drawAnimationAt(elapsed);
+  if (elapsed >= animState.duration) {
+    animState.elapsed = animState.duration; animState.running = false; updateAnimButton(); return;
+  }
+  animState.raf = requestAnimationFrame(animationFrame);
+}
+function toggleAnimation() {
+  if (animState.running) {
+    animState.elapsed += (performance.now() - animState.startAt) / 1000;
+    animState.running = false; cancelAnimationFrame(animState.raf); drawAnimationAt(animState.elapsed); updateAnimButton(); return;
+  }
+  if (!animState.events.length || animState.elapsed >= animState.duration) {
+    const plan = animationPlan();
+    if (!plan.events.length) { alert('這個戰術還沒有可播放的移動、運球或傳球線。用「移動」、「運球」或「傳球」畫線後即可播放。'); return; }
+    animState = Object.assign(animState, plan, { elapsed: 0 });
+  }
+  const tokens = document.getElementById('tokens'); if (tokens) tokens.setAttribute('opacity', '.22');
+  animState.running = true; animState.startAt = performance.now(); drawAnimationAt(animState.elapsed); updateAnimButton();
+  animState.raf = requestAnimationFrame(animationFrame);
+}
+function resetAnimation() {
+  if (animState.raf) cancelAnimationFrame(animState.raf);
+  animState.running = false; animState.elapsed = 0; animState.duration = 0; animState.events = []; animState.base = [];
+  const tokens = document.getElementById('tokens'); if (tokens) tokens.setAttribute('opacity', '1');
+  const layer = document.getElementById('animationLayer'); if (layer) layer.innerHTML = '';
+  const clock = document.getElementById('animClock'); if (clock) clock.textContent = '球與人依畫線順序播放';
+  updateAnimButton();
 }
 
 /* ═════════ 即時計時 ═════════ */
@@ -702,13 +970,11 @@ function posGaps() {
 
 function planHTML() {
   const ps = actives(); if (!ps.length) return empty();
-  const gaps = posGaps();
-  const restM = Math.max(0, S.qMin - Math.round(S.qMin * .8));
-  const playM = S.qMin - restM;
+  const gaps = S.planScen && S.planScen.startsWith(SCEN.equal.name) ? [] : posGaps();
   return `
     <h2 class="sec">自動預排</h2>
     ${gaps.length ? `<p class="warn" style="margin:0 0 10px">${gaps.join('<br>')}</p>` : ''}
-    ${S.stalePlan ? `<p class="warn" style="margin:0 0 10px">這張預排表是舊版排的（會逐分鐘換人）。按一次下面的情境重排。</p>` : ''}
+    ${S.stalePlan ? `<p class="warn" style="margin:0 0 10px">這張預排表使用舊版輪替設定。按一次下面的情境即可依新版重新排定。</p>` : ''}
     <div class="seg">
       <button data-scope="all" aria-selected="${S.scope === 'all'}">套用全場</button>
       <button data-scope="q4" aria-selected="${S.scope === 'q4'}">只換第 4 節</button>
@@ -720,12 +986,16 @@ function planHTML() {
     <div class="wrow">
       <div><label>Q1、Q2 末段／Q3、Q4 開頭休息（分鐘）</label>
         <input type="number" inputmode="numeric" min="0" max="${S.qMin - 1}" value="${S.flex.restMin}" data-flex="restMin"></div>
-      <div><label>同時休息的先發人數（1–5）</label>
+      <div><label>同時休息的先發人數（最多保留 2 位先發在場）</label>
         <input type="number" inputmode="numeric" min="1" max="5" value="${S.flex.restStarters}" data-flex="restStarters"></div>
     </div>
-    <p class="hint">調好後按「自訂輪替」套用。Q1、Q2 在每節末段輪休；Q3、Q4 在每節開頭輪休。也可直接塗改下方每分鐘格子。</p>
-    ${S.planScen ? `<p class="hint" style="margin-top:6px">目前套用：<strong>${esc(S.planScen)}</strong>${S.stalePlan ? '' : ' · 已依區段排定'}</p>` : ''}
-  <p class="hint">均衡安排依整場賽制計算：每節上場約 ${playM} 分、輪休 ${restM} 分；Q1、Q2 休在末段，Q3、Q4 休在開頭。40 分鐘制下，先發預計上場約 <strong>${playM * 4} 分鐘</strong>、輪休 8 分鐘。可調整輪休時間、人數，也可直接塗改每一格。</p>
+  <p class="hint">調好後按「自訂輪替」套用。Q1、Q2 在每節末段輪休；Q3、Q4 在每節開頭輪休。選「人人有份」時，每 2 分鐘按累計分鐘安排輪替，同時盡量保留至少 2 名先發在場。也可直接塗改下方每分鐘格子。</p>
+    ${S.planScen ? `<p class="hint" style="margin-top:6px">目前套用：<strong>${esc(S.planScen)}</strong>${S.stalePlan ? '' : ' · 已依輪替班次排定'}</p>` : ''}
+  <p class="hint">「均衡輪替」改為全場每段約 5–6 分鐘重新安排陣容，不再把替補集中在半節時段，也避免 4 分鐘就讓球員下場。會依累計分鐘分配：一般 10 人名單以 3 位先發搭配 2 位替補為主，其他名單則按人數調整；盡量維持至少 2 位先發，並兼顧 2 位後衛、2 位前鋒與中鋒位置。FIBA 教練教材建議依比賽情況安排主力休息與替補上場，沒有各國通用的固定分鐘表；FIBA 規則也沒有規定個人上場分鐘。實際換人仍需等死球等規則允許的換人機會。</p>
+    <div class="row" style="margin:12px 0">
+      <button class="btn" data-act="expRoster">匯出預排／完整備份</button>
+      <button class="btn" data-act="impRoster">匯入預排備份</button>
+    </div>
     <div class="row" style="margin:14px 0 10px">
       <button class="btn ghost" data-act="undo">復原上一步</button>
       <button class="btn ghost" data-act="clearQ">清空本節</button>
@@ -819,7 +1089,6 @@ function setupHTML() {
 
   <h2 class="sec">賽制</h2>
   <div class="row">
-    <button class="btn ${S.fmt === 32 ? 'solid' : ''}" data-act="fmt" data-v="32">32 分鐘短制<small>4 節 × 8 分</small></button>
     <button class="btn ${S.fmt === 40 ? 'solid' : ''}" data-act="fmt" data-v="40">40 分鐘制<small>4 節 × 10 分</small></button>
     <button class="btn ${S.fmt === 48 ? 'solid' : ''}" data-act="fmt" data-v="48">48 分鐘制<small>4 節 × 12 分</small></button>
   </div>
@@ -843,7 +1112,7 @@ function setupHTML() {
   <p class="hint">手機可從分享選單存到「檔案」或傳給隊友。匯入完整備份會取代賽制、名單、預排與自訂戰術，並清除即時紀錄。</p>
 
   <h2 class="sec">資料</h2>
-  <p class="hint">GitHub Pages 使用 HTTPS，可離線開啟並加入手機主畫面。iPhone／iPad：Safari 分享按鈕 →「加入主畫面」；Android：瀏覽器選單 →「安裝應用程式」或「加到主畫面」。每次操作自動存在這支裝置的瀏覽器，清除瀏覽器資料會一併消失，重要場次請先匯出名單並下載 CSV。</p>
+  <p class="hint">GitHub Pages 使用 HTTPS，可離線開啟並加入手機主畫面。iPhone／iPad：Safari 分享按鈕 →「加入主畫面」；Android：瀏覽器選單 →「安裝應用程式」或「加到主畫面」。資料自動存在這支裝置瀏覽器的本機儲存空間（localStorage），不是 cookie；清除網站資料會一併刪除。要換手機或留存預排，請匯出完整備份 JSON，再於另一支裝置匯入。</p>
   <button class="btn wide ghost" data-act="wipe" style="margin-top:8px;color:var(--alert);border-color:var(--alert)">清除全部資料</button>`;
 }
 
@@ -867,40 +1136,68 @@ function spotsToTokens(spots) {
     return { x, y, no: p ? (p.no || String(i + 1)) : String(i + 1), name: p ? p.name.trim() : pos };
   });
 }
+function ensureFreeBoard() {
+  const b = S.freeBoard;
+  if (b.tokens.length) return;
+  b.tokens = spotsToTokens([
+    ['PG', 75, 112], ['SG', 9, 23], ['SF', 141, 23], ['PF', 55, 53], ['C', 95, 53]
+  ]).concat([{ ball: true, x: 80, y: 111 }]);
+  b.marks = []; b.play = '';
+}
+const PLAY_VERSION = 3;
+function setBuiltinPlay(i) {
+  const pl = PLAYS[i]; if (!pl) return;
+  const b = S.board, offense = spotsToTokens(pl.spots);
+  const defense = (pl.defense || []).map(([x, y], j) => ({ d: 1, no: String(j + 1), x, y }));
+  b.tokens = offense.concat(defense);
+  b.marks = pl.marks.map(m => ({ t: m.t, p: m.p.map(q => q.slice()), actorIndex: m.actorIndex, phase: m.phase }));
+  (pl.defenseMoves || []).forEach(m => b.marks.push({
+    t: 'move', p: m.p.map(q => q.slice()), actorIndex: offense.length + m.defender,
+    phase: m.phase, defense: true
+  }));
+  b.full = false; b.play = 'p' + i; b.playVersion = PLAY_VERSION;
+}
 function loadPlay(src, i) {
+  resetAnimation();
   const b = S.board;
   if (src === 'p') {
-    const pl = PLAYS[i];
-    b.tokens = spotsToTokens(pl.spots);
-    b.marks = pl.marks.map(m => ({ t: m.t, p: m.p.map(q => q.slice()) }));
-    b.full = false; b.play = 'p' + i;
+    setBuiltinPlay(i);
   } else {
     const pl = S.plays[i];
     b.tokens = pl.tokens.map(t => Object.assign({}, t));
-    b.marks = (pl.marks || []).map(m => ({ t: m.t, p: m.p.map(q => q.slice()) }));
+    b.marks = (pl.marks || []).map(m => ({ t: m.t, p: m.p.map(q => q.slice()), actorIndex: m.actorIndex, phase: m.phase, defense: m.defense }));
     b.full = !!pl.full; b.play = 'm' + i;
   }
   save(true); render();
 }
 function boardHTML() {
-  const b = S.board;
-  if (!b.tokens.length) { b.tokens = spotsToTokens(PLAYS[0].spots); b.play = ''; }
-  const cur = b.play.startsWith('p') ? PLAYS[+b.play.slice(1)] : null;
+  const b = activeBoard(), free = S.boardMode === 'free';
+  if (free) ensureFreeBoard();
+  if (!free && b.play && b.play.startsWith('p') && b.playVersion !== PLAY_VERSION) {
+    setBuiltinPlay(+b.play.slice(1)); save(true);
+  }
+  if (!free && !b.tokens.length) { setBuiltinPlay(0); save(true); }
+  const cur = !free && b.play.startsWith('p') ? PLAYS[+b.play.slice(1)] : null;
   return `
-  <h2 class="sec">戰術庫</h2>
-  <div class="plays">
+  <h2 class="sec">戰術板</h2>
+  <div class="seg">
+    <button data-board-mode="library" aria-selected="${!free}">戰術庫（含動畫）</button>
+    <button data-board-mode="free" aria-selected="${free}">自由戰術板</button>
+  </div>
+  ${!free ? `<div class="plays">
     ${PLAYS.map((p, i) => `<button class="pl" data-play="${i}" aria-selected="${b.play === 'p' + i}">${p.name}<b>${p.en}</b></button>`).join('')}
     ${S.plays.map((p, i) => `<button class="pl" data-myplay="${i}" aria-selected="${b.play === 'm' + i}">${esc(p.name)}<b>自訂</b></button>
       <button class="pl" data-delplay="${i}" aria-label="刪除">✕</button>`).join('')}
-  </div>
+  </div>` : `<p class="hint">拖動橘色籃球到任何位置；球員用「移動」畫靜態跑位箭頭，不會播放動畫。這塊板和戰術庫分開保存。</p>`}
   <div class="seg">
     <button data-court="0" aria-selected="${!b.full}">半場</button>
     <button data-court="1" aria-selected="${b.full}">全場</button>
   </div>
   ${courtSVG(b.full)}
   <div class="tools">
-    ${TOOLS.map(([k, l]) => `<button data-tool="${k}" aria-selected="${b.tool === k}">${l}</button>`).join('')}
+    ${TOOLS.map(([k, l]) => `<button data-tool="${k}" aria-selected="${b.tool === k}">${free && k === 'drag' ? '拖球／人' : l}</button>`).join('')}
   </div>
+  <p class="hint" style="margin:4px 0 8px"><span style="color:#2563EB">● 運球</span>　<span style="color:#EA580C">● 掩護</span>　<span style="color:#15803D">● 進攻移動</span>　<span style="color:#7C3AED">● 傳球</span>　<span style="color:#D92D20">● 防守移動</span></p>
   <div class="row">
     <button class="btn ghost" data-act="undoMark">復原一筆</button>
     <button class="btn ghost" data-act="toggleDef">${b.tokens.some(t => t.d) ? '移除防守方' : '加防守方'}</button>
@@ -910,21 +1207,26 @@ function boardHTML() {
     <button class="btn" data-act="savePlay">存成我的戰術</button>
     <button class="btn" data-act="pngBoard">下載圖片</button>
   </div>
+  ${!free ? `<div class="row" style="margin-top:8px">
+    <button class="btn hi" data-act="animToggle" id="animToggle">▶ 播放走位</button>
+    <button class="btn ghost" data-act="animReset">重置動畫</button>
+    <span class="hint" id="animClock" style="align-self:center">球與人依畫線順序播放</span>
+  </div>` : ''}
   ${cur ? `<div class="steps"><h3>${cur.name} — 跑法</h3><ol class="steps">${cur.steps.map(s => `<li>${s}</li>`).join('')}</ol></div>` : ''}
-  <p class="hint">選「拖人」可以把球員拖到任何位置；選其他工具時，從球員身上開始畫，線就會從他那裡出發。移動＝實線箭頭，傳球＝虛線，運球＝波浪線，掩護＝結尾一根橫桿。畫錯用「擦除」點那條線，或按「復原一筆」。</p>`;
+  <p class="hint">${free ? '自由戰術板：拖動籃球與球員調整位置；選「移動」從球員身上畫出靜態箭頭。' : '「移動」從球員身上開始畫，可播放該球員走位；運球和傳球會帶動球。動畫按畫線順序播放。選「拖人」可以移動球員。'} 掩護＝結尾一根橫桿。畫錯用「擦除」點線，或按「復原一筆」。</p>`;
 }
 
 function drawMarks(tmp) {
   const g = document.getElementById('marks'); if (!g) return;
-  g.innerHTML = S.board.marks.map(markSVG).join('') + (tmp && tmp.p.length > 1 ? markSVG(tmp, -1) : '');
+  g.innerHTML = activeBoard().marks.map(markSVG).join('') + (tmp && tmp.p.length > 1 ? markSVG(tmp, -1) : '');
 }
 function drawTokens() {
   const g = document.getElementById('tokens'); if (!g) return;
-  g.innerHTML = S.board.tokens.map(tokenSVG).join('');
+  g.innerHTML = activeBoard().tokens.map(tokenSVG).join('');
 }
 function initBoard() {
   const svg = document.getElementById('board'); if (!svg) return;
-  const b = S.board;
+  const b = activeBoard();
   const pt = e => {
     const r = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
     return [+(vb.x + (e.clientX - r.left) / r.width * vb.width).toFixed(1),
@@ -933,6 +1235,7 @@ function initBoard() {
   let drag = null, stroke = null;
 
   svg.addEventListener('pointerdown', e => {
+    resetAnimation();
     const [x, y] = pt(e), tk = e.target.closest('[data-tok]');
     if (b.tool === 'erase') {                        // 點最近的一條線把它擦掉
       let bi = -1, bd = 9e9;
@@ -944,7 +1247,7 @@ function initBoard() {
     }
     if (tk && b.tool === 'drag') { drag = +tk.dataset.tok; svg.setPointerCapture(e.pointerId); return; }
     const from = tk ? [b.tokens[+tk.dataset.tok].x, b.tokens[+tk.dataset.tok].y] : [x, y];
-    stroke = { t: b.tool === 'drag' ? 'move' : b.tool, p: [from] };
+    stroke = { t: b.tool === 'drag' ? 'move' : b.tool, p: [from], actorIndex: tk ? +tk.dataset.tok : null };
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener('pointermove', e => {
@@ -995,6 +1298,7 @@ const pushUndo = src => {
 
 document.getElementById('tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
+  resetAnimation();
   S.tab = b.dataset.tab; save(); render();
 });
 
@@ -1021,6 +1325,12 @@ view.addEventListener('click', e => {
   if (sc) { S.scope = sc.dataset.scope; save(); render(); return; }
 
   // ── 戰術板 ──
+  const bm = e.target.closest('[data-board-mode]');
+  if (bm) {
+    resetAnimation(); S.boardMode = bm.dataset.boardMode === 'free' ? 'free' : 'library';
+    if (S.boardMode === 'free') ensureFreeBoard();
+    save(true); render(); return;
+  }
   const pl = e.target.closest('[data-play]');
   if (pl) { loadPlay('p', +pl.dataset.play); return; }
   const mp = e.target.closest('[data-myplay]');
@@ -1035,15 +1345,16 @@ view.addEventListener('click', e => {
     return;
   }
   const cv = e.target.closest('[data-court]');
-  if (cv) { S.board.full = cv.dataset.court === '1'; save(); render(); return; }
+  if (cv) { resetAnimation(); activeBoard().full = cv.dataset.court === '1'; save(); render(); return; }
   const tl = e.target.closest('[data-tool]');
   if (tl) {
     const k = tl.dataset.tool;
     if (k === '*clear') {
-      if (S.board.marks.length && !confirm('清掉板子上所有畫的線？')) return;
-      S.board.marks = []; drawMarks(); save(true); return;
+      if (activeBoard().marks.length && !confirm('清掉板子上所有畫的線？')) return;
+      resetAnimation(); activeBoard().marks = []; drawMarks(); save(true); return;
     }
-    S.board.tool = k;
+    resetAnimation();
+    activeBoard().tool = k;
     document.querySelectorAll('[data-tool]').forEach(x =>
       x.setAttribute('aria-selected', String(x.dataset.tool === k)));
     return;
@@ -1062,7 +1373,9 @@ view.addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const act = b.dataset.act;
 
-  if (act === 'toggleClock') S.lv.running ? pauseClock() : startClock();
+  if (act === 'animToggle') toggleAnimation();
+  else if (act === 'animReset') resetAnimation();
+  else if (act === 'toggleClock') S.lv.running ? pauseClock() : startClock();
   else if (act === 'nextQ') {
     pauseClock();
     if (S.lv.written < S.qMin && !confirm(`第 ${S.lv.q + 1} 節只記錄了 ${S.lv.written} 分，還沒滿 ${S.qMin} 分。直接進下一節嗎？`)) return;
@@ -1089,7 +1402,7 @@ view.addEventListener('click', e => {
     const v = +b.dataset.v; if (v === S.fmt) return;
     const used = ['plan', 'live'].some(s => S[s].some(qq => qq.some(m => m.length)));
     if (used && !confirm('改賽制會清空預排表與即時紀錄，確定？')) return;
-    S.fmt = v; S.qMin = v === 32 ? 8 : v === 40 ? 10 : 12;
+    S.fmt = v === 48 ? 48 : 40; S.qMin = S.fmt === 48 ? 12 : 10;
     S.flex.restMin = Math.min(S.qMin - 1, S.flex.restMin);
     S.plan = blankGrid(S.qMin); S.live = blankGrid(S.qMin);
     S.lv = Object.assign(defaults().lv, { onCourt: S.lv.onCourt });
@@ -1099,31 +1412,37 @@ view.addEventListener('click', e => {
     if (!confirm('清除名單、預排與紀錄，全部歸零？')) return;
     localStorage.removeItem(LS); localStorage.removeItem(LS_OLD); S = defaults(); render();
   }
-  else if (act === 'undoMark') { S.board.marks.pop(); drawMarks(); save(true); }
+  else if (act === 'undoMark') { resetAnimation(); activeBoard().marks.pop(); drawMarks(); save(true); }
   else if (act === 'toggleDef') {
-    const b = S.board;
+    resetAnimation();
+    const b = activeBoard();
     if (b.tokens.some(t => t.d)) b.tokens = b.tokens.filter(t => !t.d);
-    else b.tokens = b.tokens.concat(b.tokens.map(t => ({
-      d: 1, x: +(t.x + (75 - t.x) * 0.14).toFixed(1), y: +(t.y - (t.y - 15.75) * 0.16).toFixed(1)
-    })));
+    else {
+  const spots = [[56, 56], [94, 56], [56, 31], [94, 31], [75, 22]];
+      b.tokens = b.tokens.concat(spots.map(([x, y], i) => ({ d: 1, no: String(i + 1), x, y })));
+    }
     save(true); render();
   }
   else if (act === 'loadFive') {
+    resetAnimation();
     const five = pickFive();
     if (!five.length) { alert('名單還是空的，先到「名單」頁填人。'); return; }
-    S.board.tokens.filter(t => !t.d).forEach((t, i) => {
+    activeBoard().tokens.filter(t => !t.d && !t.ball).forEach((t, i) => {
       const p = five[i];
       if (p) { t.no = p.no || String(i + 1); t.name = p.name.trim(); }
     });
     save(true); render();
   }
   else if (act === 'savePlay') {
-    const n = prompt('這個戰術叫什麼？', S.board.play.startsWith('p') ? PLAYS[+S.board.play.slice(1)].name + ' 改' : '我的戰術');
+    resetAnimation();
+    const board = activeBoard();
+    const suggested = S.boardMode === 'library' && board.play.startsWith('p') ? PLAYS[+board.play.slice(1)].name + ' 改' : '我的戰術';
+    const n = prompt('這個戰術叫什麼？', suggested);
     if (!n) return;
-    S.plays.push({ name: n.slice(0, 12), full: S.board.full,
-      tokens: S.board.tokens.map(t => Object.assign({}, t)),
-      marks: S.board.marks.map(m => ({ t: m.t, p: m.p.map(q => q.slice()) })) });
-    S.board.play = 'm' + (S.plays.length - 1);
+    S.plays.push({ name: n.slice(0, 12), full: board.full,
+      tokens: board.tokens.map(t => Object.assign({}, t)),
+      marks: board.marks.map(m => ({ t: m.t, p: m.p.map(q => q.slice()), actorIndex: m.actorIndex, phase: m.phase, defense: m.defense })) });
+    if (S.boardMode === 'library') board.play = 'm' + (S.plays.length - 1);
     save(true); render();
   }
   else if (act === 'pngBoard') pngBoard();
@@ -1227,8 +1546,9 @@ function captureTemplate(name) {
 function applyTemplate(i) {
   const t = S.templates[i]; if (!t) return;
   if (!confirm(`套用「${t.name}」？會替換賽制、名單、預排和自訂戰術，並清除目前的即時紀錄。`)) return;
-  S.fmt = [32, 40, 48].includes(+t.fmt) ? +t.fmt : 32;
-  S.qMin = [8, 10, 12].includes(+t.qMin) ? +t.qMin : (S.fmt === 48 ? 12 : S.fmt === 40 ? 10 : 8);
+  const migrated32 = +t.fmt === 32 || +t.qMin === 8;
+  S.fmt = +t.fmt === 48 ? 48 : 40;
+  S.qMin = migrated32 ? 10 : (S.fmt === 48 ? 12 : 10);
   S.roster = (t.roster || []).slice(0, 15).map((p, j) => ({
     id: p.id || uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3),
     name: String(p.name || ''), pos: POS.includes(p.pos) ? p.pos : POS[j % 5], role: p.role === 'S' ? 'S' : 'R'
@@ -1239,7 +1559,7 @@ function applyTemplate(i) {
   S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
   S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
   S.plan = fitGrid(t.plan, S.qMin); S.planScen = t.planScen || '';
-  S.planAlgo = t.planAlgo || ALGO; S.stalePlan = S.planAlgo !== ALGO && S.plan.some(q => q.some(m => m.length));
+  S.planAlgo = t.planAlgo || ALGO; S.stalePlan = (migrated32 || S.planAlgo !== ALGO) && S.plan.some(q => q.some(m => m.length));
   S.plays = Array.isArray(t.plays) ? JSON.parse(JSON.stringify(t.plays)) : [];
   S.live = blankGrid(S.qMin); S.lv = defaults().lv; S.board = defaults().board;
   S.tab = 'plan'; S.gq = 0; undoStack.length = 0;
@@ -1272,8 +1592,9 @@ function applyRoster(text) {
   try { d = JSON.parse(text); } catch (e) { alert('讀不到內容，這不是匯出的名單檔。'); return; }
   if (!d || !Array.isArray(d.roster)) { alert('檔案裡沒有名單資料。'); return; }
   if (!confirm(`匯入 ${d.roster.filter(p => p && (p.no || p.name)).length} 位球員？目前賽制、名單、預排與自訂戰術會被取代，即時紀錄會清空。`)) return;
-  S.fmt = [32, 40, 48].includes(+d.fmt) ? +d.fmt : 40;
-  S.qMin = [8, 10, 12].includes(+d.qMin) ? +d.qMin : S.fmt === 32 ? 8 : S.fmt === 40 ? 10 : 12;
+  const migrated32 = +d.fmt === 32 || +d.qMin === 8;
+  S.fmt = +d.fmt === 48 ? 48 : 40;
+  S.qMin = S.fmt === 48 && !migrated32 ? 12 : 10;
   S.w = { S: +(d.w && d.w.S) || 1.5, R: +(d.w && d.w.R) || 1 };
   S.roster = d.roster.slice(0, 15).map((p, i) => ({
     id: d.v >= 3 && p.id ? String(p.id) : uid(), no: String(p.no || '').replace(/\D/g, '').slice(0, 3), name: String(p.name || ''),
@@ -1285,7 +1606,8 @@ function applyRoster(text) {
   S.flex.restMin = Math.min(S.qMin - 1, Math.max(0, Math.floor(+S.flex.restMin || 0)));
   S.flex.restStarters = Math.min(5, Math.max(1, Math.floor(+S.flex.restStarters || 1)));
   S.plan = d.v >= 3 ? fitGrid(d.plan, S.qMin) : blankGrid(S.qMin);
-  S.planScen = d.planScen || ''; S.planAlgo = d.planAlgo || ALGO; S.stalePlan = false;
+  S.planScen = d.planScen || ''; S.planAlgo = d.planAlgo || ALGO;
+  S.stalePlan = (migrated32 || S.planAlgo !== ALGO) && S.plan.some(q => q.some(m => m.length));
   if (Array.isArray(d.templates)) S.templates = d.templates;
   S.live = blankGrid(S.qMin);
   S.lv = defaults().lv; S.board = defaults().board; S.gq = 0; S.tab = 'setup'; undoStack.length = 0;
